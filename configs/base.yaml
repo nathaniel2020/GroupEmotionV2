@@ -1,0 +1,35 @@
+project:
+  name: group_emotion_video_lite
+  runtime_dir: runtime
+  prompts_dir: prompts
+  output_dir: runtime/outputs
+
+annotation:
+  required_fields:
+    - group_emotion
+    - emotion_intensity
+    - evidence
+    - confidence
+  min_confidence: 0.65
+  review_confidence: 0.80
+  require_evidence: true
+  random_review_ratio: 0.10
+
+logging:
+  level: INFO
+  console_level: INFO
+  save_raw_llm_payloads: true
+
+llm:
+  enabled: false
+  api_key_env: OPENAI_API_KEY
+  base_url: https://api.openai.com/v1
+  model: gpt-4.1-mini
+  timeout_sec: 120
+  temperature: 0.1
+  max_retries: 3
+  retry_backoff_sec: 2
+  max_images_per_request: 6
+  use_remote_video_url: false
+  response_format: json_object
+

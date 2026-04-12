@@ -1,0 +1,15 @@
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+data/raw/*
+data/interim/*
+data/processed/*
+runtime/*
+
+!data/raw/.gitkeep
+!data/interim/.gitkeep
+!data/processed/.gitkeep
+!runtime/.gitkeep
