@@ -8,3 +8,5 @@
 - 创建基础目录、README 和规划文件
 - 补齐了最小代码骨架：配置加载、run 级日志、LLM 客户端、CLI
 - 运行了 `plan`、`annotate --dry-run`、`status`，确认日志和 review 队列落盘正常
+- 提交了初始 commit：`fcd734e`
+- 推送到远程分支：`origin/main`
