@@ -337,6 +337,8 @@ export BILIBILI_COOKIE='你的完整 cookie'
 python scripts/run_pipeline.py --config configs/profiles/continuous_vllm_pipeline.yaml download-loop
 ```
 
+程序内部会把这串 cookie 注入 `requests` 的 cookie jar，并为 `yt-dlp` 生成临时 `cookiefile`，不再把 cookie 作为普通请求头透传。
+
 ## `status` 解读
 
 `python scripts/run_pipeline.py status` 会返回：

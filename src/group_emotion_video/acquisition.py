@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import os
@@ -9,7 +10,9 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from http.cookies import SimpleCookie
 from pathlib import Path
+import tempfile
 from typing import Any
 
 from .hashing import file_sha256
@@ -119,6 +122,7 @@ class BilibiliAdapter:
         self.logger = logger
         self._requests = None
         self._session = None
+        self._cookie_file_path: str | None = None
         self._user_agents = [
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -161,6 +165,7 @@ class BilibiliAdapter:
             raise RuntimeError("requests package is required for live Bilibili access.") from exc
         self._requests = requests
         self._session = requests.Session()
+        self._apply_session_cookies(self._session)
         return self._session
 
     def _cookie_value(self) -> str | None:
@@ -173,6 +178,58 @@ class BilibiliAdapter:
         env_cookie = str(os.getenv(env_name) or "").strip()
         return env_cookie or None
 
+    def _cookie_pairs(self) -> list[tuple[str, str]]:
+        cookie_value = self._cookie_value()
+        if not cookie_value:
+            return []
+        jar = SimpleCookie()
+        jar.load(cookie_value)
+        pairs = [(key, morsel.value) for key, morsel in jar.items()]
+        if pairs:
+            return pairs
+        output: list[tuple[str, str]] = []
+        for chunk in cookie_value.split(";"):
+            if "=" not in chunk:
+                continue
+            key, value = chunk.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if key:
+                output.append((key, value))
+        return output
+
+    def _apply_session_cookies(self, session: Any) -> None:
+        if not self._requests:
+            return
+        for key, value in self._cookie_pairs():
+            session.cookies.set(key, value, domain=".bilibili.com", path="/")
+
+    def _ensure_cookie_file(self) -> str | None:
+        if self._cookie_file_path is not None:
+            return self._cookie_file_path
+        pairs = self._cookie_pairs()
+        if not pairs:
+            return None
+        handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="bilibili_cookie_", suffix=".txt", delete=False)
+        lines = ["# Netscape HTTP Cookie File", ""]
+        for key, value in pairs:
+            lines.append(f".bilibili.com\tTRUE\t/\tTRUE\t0\t{key}\t{value}")
+        handle.write("\n".join(lines) + "\n")
+        handle.close()
+        os.chmod(handle.name, 0o600)
+        self._cookie_file_path = handle.name
+        atexit.register(self._cleanup_cookie_file)
+        return self._cookie_file_path
+
+    def _cleanup_cookie_file(self) -> None:
+        if not self._cookie_file_path:
+            return
+        try:
+            os.unlink(self._cookie_file_path)
+        except FileNotFoundError:
+            pass
+        self._cookie_file_path = None
+
     def _http_headers(self, *, user_agent: str | None = None) -> dict[str, str]:
         headers = {
             "Referer": "https://www.bilibili.com/",
@@ -180,9 +237,6 @@ class BilibiliAdapter:
         }
         if user_agent:
             headers["User-Agent"] = user_agent
-        cookie = self._cookie_value()
-        if cookie:
-            headers["Cookie"] = cookie
         return headers
 
     def _retry_cfg(self) -> dict[str, float]:
@@ -259,6 +313,9 @@ class BilibiliAdapter:
             "progress_hooks": [self._build_progress_hook(progress_label or str(url))],
             "http_headers": self._http_headers(user_agent=random.choice(self._user_agents)),
         }
+        cookie_file = self._ensure_cookie_file()
+        if cookie_file:
+            options["cookiefile"] = cookie_file
         if output_dir is not None:
             options["outtmpl"] = str(Path(output_dir) / "%(id)s.%(ext)s")
         with YoutubeDL(options) as ydl:

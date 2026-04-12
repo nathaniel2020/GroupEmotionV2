@@ -135,5 +135,19 @@ def test_bilibili_adapter_http_headers_include_cookie_from_env(monkeypatch) -> N
     headers = adapter._http_headers(user_agent="UA_TEST")
 
     assert headers["User-Agent"] == "UA_TEST"
-    assert headers["Cookie"] == "SESSDATA=test; bili_jct=test"
     assert headers["Referer"] == "https://www.bilibili.com/"
+    assert "Cookie" not in headers
+
+
+def test_bilibili_adapter_cookie_file_uses_netscape_format(monkeypatch) -> None:
+    monkeypatch.setenv("BILIBILI_COOKIE", "SESSDATA=test; bili_jct=test")
+    adapter = BilibiliAdapter(_adapter_config())
+
+    cookie_file = adapter._ensure_cookie_file()
+
+    assert cookie_file is not None
+    content = Path(cookie_file).read_text(encoding="utf-8")
+    assert "# Netscape HTTP Cookie File" in content
+    assert ".bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\ttest" in content
+    assert ".bilibili.com\tTRUE\t/\tTRUE\t0\tbili_jct\ttest" in content
+    adapter._cleanup_cookie_file()
