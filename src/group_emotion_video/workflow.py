@@ -163,7 +163,7 @@ class Workflow:
         while True:
             cycle += 1
             refill_info = self._ensure_queries_available(cfg)
-            processed = self.acquisition.crawl(limit=int(cfg.get("max_queries_per_cycle", self.config["crawl"]["max_queries_per_run"])))
+            processed = self.acquisition.crawl(limit=self._limit_from_cfg(cfg.get("max_queries_per_cycle"), fallback=int(self.config["crawl"]["max_queries_per_run"])))
             snapshot = self.status()
             self._log_loop_snapshot("download-loop", cycle, snapshot, {"processed_items": processed, **refill_info})
             if self._should_stop_loop(cfg, cycle=cycle, idle=processed <= 0, snapshot=snapshot):
@@ -178,11 +178,11 @@ class Workflow:
         annotation_service = self._build_annotation_service()
         preprocess_workers = max(1, int(self.config["preprocessing"].get("workers", 1)))
         annotation_workers = max(1, int(self.config["annotation"].get("clip_workers", 1)))
-        preprocess_claim_limit = max(1, int(cfg.get("preprocess_claim_limit", preprocess_workers)))
-        annotation_batch_size = max(1, int(cfg.get("annotation_batch_size", annotation_workers)))
-        annotation_trigger_size = max(1, int(cfg.get("annotation_trigger_size", annotation_workers)))
+        preprocess_claim_limit = self._optional_positive_int(cfg.get("preprocess_claim_limit"), fallback=preprocess_workers)
+        annotation_batch_size = self._optional_positive_int(cfg.get("annotation_batch_size"), fallback=annotation_workers)
+        annotation_trigger_size = self._optional_nonnegative_int(cfg.get("annotation_trigger_size"), fallback=annotation_workers)
         annotation_trigger_timeout_sec = float(cfg.get("annotation_trigger_timeout_sec", 30.0))
-        queue_max_clips = max(annotation_trigger_size, int(cfg.get("queue_max_clips", annotation_trigger_size * 5)))
+        queue_max_clips = self._optional_nonnegative_int(cfg.get("queue_max_clips"), fallback=max(annotation_trigger_size or annotation_workers, 1) * 5)
         cycle = 0
 
         with ThreadPoolExecutor(max_workers=preprocess_workers) as preprocess_executor, ThreadPoolExecutor(max_workers=annotation_workers) as annotation_executor:
@@ -198,8 +198,10 @@ class Workflow:
                 pending_annotation_age_sec = float(snapshot["clips"]["oldest_pending_age_sec"] or 0.0)
 
                 available_preprocess_slots = max(0, preprocess_workers - len(preprocess_futures))
-                if available_preprocess_slots > 0 and pending_annotation < queue_max_clips:
-                    videos = self.video_repo.claim_downloaded_for_preprocess(min(preprocess_claim_limit, available_preprocess_slots))
+                queue_has_capacity = queue_max_clips <= 0 or pending_annotation < queue_max_clips
+                if available_preprocess_slots > 0 and queue_has_capacity:
+                    claim_limit = available_preprocess_slots if preprocess_claim_limit is None or preprocess_claim_limit <= 0 else min(preprocess_claim_limit, available_preprocess_slots)
+                    videos = self.video_repo.claim_downloaded_for_preprocess(claim_limit)
                     for video_record in videos:
                         future = preprocess_executor.submit(preprocess_service._process_video, video_record)
                         preprocess_futures[future] = video_record
@@ -207,7 +209,8 @@ class Workflow:
                 should_dispatch_annotations = (
                     pending_annotation > 0
                     and (
-                        pending_annotation >= annotation_trigger_size
+                        annotation_trigger_size <= 0
+                        or pending_annotation >= annotation_trigger_size
                         or pending_annotation_age_sec >= annotation_trigger_timeout_sec
                         or (
                             len(preprocess_futures) == 0
@@ -217,7 +220,8 @@ class Workflow:
                 )
                 available_annotation_slots = max(0, annotation_workers - len(annotation_futures))
                 if should_dispatch_annotations and available_annotation_slots > 0:
-                    clips = self.clip_repo.claim_pending_annotations(min(annotation_batch_size, available_annotation_slots))
+                    claim_limit = available_annotation_slots if annotation_batch_size is None or annotation_batch_size <= 0 else min(annotation_batch_size, available_annotation_slots)
+                    clips = self.clip_repo.claim_pending_annotations(claim_limit)
                     for clip_record in clips:
                         future = annotation_executor.submit(annotation_service.annotate_clip_record, clip_record)
                         annotation_futures[future] = clip_record
@@ -313,7 +317,7 @@ class Workflow:
             return info
         info["recycled_queries"] = int(
             self.query_repo.recycle_done(
-                int(cfg.get("refill_batch_size", cfg.get("max_queries_per_cycle", self.config["crawl"]["max_queries_per_run"]))),
+                self._limit_from_cfg(cfg.get("refill_batch_size"), fallback=self._limit_from_cfg(cfg.get("max_queries_per_cycle"), fallback=int(self.config["crawl"]["max_queries_per_run"]))),
                 cooldown_sec=float(cfg.get("query_recycle_cooldown_sec", 0)),
                 max_runs_per_query=int(cfg.get("max_runs_per_query", 0)),
             )
@@ -373,6 +377,28 @@ class Workflow:
         if extras:
             payload["extras"] = extras
         self.logger.info("%s %s", loop_name, json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+    @staticmethod
+    def _optional_positive_int(value: Any, *, fallback: int | None) -> int | None:
+        if value is None:
+            return fallback
+        normalized = int(value)
+        if normalized <= 0:
+            return None
+        return normalized
+
+    @staticmethod
+    def _optional_nonnegative_int(value: Any, *, fallback: int) -> int:
+        if value is None:
+            return int(fallback)
+        normalized = int(value)
+        return max(normalized, 0)
+
+    @staticmethod
+    def _limit_from_cfg(value: Any, *, fallback: int | None) -> int | None:
+        if value is None:
+            return fallback
+        return int(value)
 
     def run(self, steps: list[str]) -> dict[str, Any]:
         results: dict[str, Any] = {}

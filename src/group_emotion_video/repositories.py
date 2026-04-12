@@ -39,16 +39,25 @@ class QueryRepository:
             ),
         )
 
-    def list_pending(self, limit: int) -> list[dict[str, Any]]:
-        rows = self.db.fetchall(
-            """
-            SELECT * FROM queries
-            WHERE status IN ('pending', 'retry')
-            ORDER BY COALESCE(last_run_at, ''), excel_row, query_text
-            LIMIT ?
-            """,
-            (int(limit),),
-        )
+    def list_pending(self, limit: int | None) -> list[dict[str, Any]]:
+        if limit is None or int(limit) <= 0:
+            rows = self.db.fetchall(
+                """
+                SELECT * FROM queries
+                WHERE status IN ('pending', 'retry')
+                ORDER BY COALESCE(last_run_at, ''), excel_row, query_text
+                """
+            )
+        else:
+            rows = self.db.fetchall(
+                """
+                SELECT * FROM queries
+                WHERE status IN ('pending', 'retry')
+                ORDER BY COALESCE(last_run_at, ''), excel_row, query_text
+                LIMIT ?
+                """,
+                (int(limit),),
+            )
         return [dict(row) for row in rows]
 
     def mark_done(self, query_id: str, hit_count: int) -> None:
@@ -57,7 +66,7 @@ class QueryRepository:
             (datetime.now().isoformat(timespec="seconds"), int(hit_count), query_id),
         )
 
-    def recycle_done(self, limit: int, *, cooldown_sec: float = 0.0, max_runs_per_query: int = 0) -> int:
+    def recycle_done(self, limit: int | None, *, cooldown_sec: float = 0.0, max_runs_per_query: int = 0) -> int:
         cooldown_sec = max(float(cooldown_sec), 0.0)
         max_runs_per_query = max(int(max_runs_per_query), 0)
         rows = self.db.fetchall(
@@ -85,7 +94,7 @@ class QueryRepository:
                 if elapsed_sec < cooldown_sec:
                     continue
             recyclable.append(str(row["query_id"]))
-            if len(recyclable) >= int(limit):
+            if limit is not None and int(limit) > 0 and len(recyclable) >= int(limit):
                 break
         if not recyclable:
             return 0
@@ -229,23 +238,36 @@ class VideoRepository:
             ),
         )
 
-    def list_downloaded_for_preprocess(self, limit: int) -> list[dict[str, Any]]:
-        rows = self.db.fetchall(
-            """
-            SELECT * FROM videos
-            WHERE download_status='downloaded'
-              AND raw_video_path IS NOT NULL
-              AND COALESCE(retention_status, '')=''
-              AND preprocess_started_at IS NULL
-              AND preprocess_finished_at IS NULL
-            ORDER BY source_excel_row, title
-            LIMIT ?
-            """,
-            (int(limit),),
-        )
+    def list_downloaded_for_preprocess(self, limit: int | None) -> list[dict[str, Any]]:
+        if limit is None or int(limit) <= 0:
+            rows = self.db.fetchall(
+                """
+                SELECT * FROM videos
+                WHERE download_status='downloaded'
+                  AND raw_video_path IS NOT NULL
+                  AND COALESCE(retention_status, '')=''
+                  AND preprocess_started_at IS NULL
+                  AND preprocess_finished_at IS NULL
+                ORDER BY source_excel_row, title
+                """
+            )
+        else:
+            rows = self.db.fetchall(
+                """
+                SELECT * FROM videos
+                WHERE download_status='downloaded'
+                  AND raw_video_path IS NOT NULL
+                  AND COALESCE(retention_status, '')=''
+                  AND preprocess_started_at IS NULL
+                  AND preprocess_finished_at IS NULL
+                ORDER BY source_excel_row, title
+                LIMIT ?
+                """,
+                (int(limit),),
+            )
         return [self._deserialize(row) for row in rows]
 
-    def claim_downloaded_for_preprocess(self, limit: int) -> list[dict[str, Any]]:
+    def claim_downloaded_for_preprocess(self, limit: int | None) -> list[dict[str, Any]]:
         rows = self.list_downloaded_for_preprocess(limit)
         if not rows:
             return []
@@ -445,16 +467,25 @@ class ClipRepository:
     def update_annotation_status(self, clip_uid: str, status: str) -> None:
         self.db.execute("UPDATE clips SET annotation_status=? WHERE clip_uid=?", (status, clip_uid))
 
-    def claim_pending_annotations(self, limit: int) -> list[dict[str, Any]]:
-        rows = self.db.fetchall(
-            """
-            SELECT * FROM clips
-            WHERE filter_status='accepted' AND annotation_status='pending'
-            ORDER BY COALESCE(created_at, ''), clip_uid
-            LIMIT ?
-            """,
-            (int(limit),),
-        )
+    def claim_pending_annotations(self, limit: int | None) -> list[dict[str, Any]]:
+        if limit is None or int(limit) <= 0:
+            rows = self.db.fetchall(
+                """
+                SELECT * FROM clips
+                WHERE filter_status='accepted' AND annotation_status='pending'
+                ORDER BY COALESCE(created_at, ''), clip_uid
+                """
+            )
+        else:
+            rows = self.db.fetchall(
+                """
+                SELECT * FROM clips
+                WHERE filter_status='accepted' AND annotation_status='pending'
+                ORDER BY COALESCE(created_at, ''), clip_uid
+                LIMIT ?
+                """,
+                (int(limit),),
+            )
         if not rows:
             return []
         clip_uids = [str(row["clip_uid"]) for row in rows]

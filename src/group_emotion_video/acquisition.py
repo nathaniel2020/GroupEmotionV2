@@ -438,7 +438,7 @@ class AcquisitionService:
         return result, started_at, finished_at, elapsed_sec
 
     def crawl(self, limit: int | None = None) -> int:
-        pending_queries = self.query_repo.list_pending(limit or int(self.config["crawl"]["max_queries_per_run"]))
+        pending_queries = self.query_repo.list_pending(limit if limit is not None else int(self.config["crawl"]["max_queries_per_run"]))
         processed = 0
         for query in pending_queries:
             search_query = build_search_query(query)

@@ -123,6 +123,7 @@ python scripts/run_pipeline.py \
 - 循环快照里会看到 `downloading / downloaded / pending_preprocess`
 - 当 `queries` 表为空时可自动补种
 - 当 `pending` 用完时可自动 recycle 已完成 query，不需要手动重新 `seed-queries`
+- `max_queries_per_cycle: 0` 表示每轮尽可能多抓，不人为限制 query 批次
 
 `pipeline-loop` 的特点：
 
@@ -140,9 +141,11 @@ python scripts/run_pipeline.py \
 - `crawl.download.workers`：下载并发
 - `crawl.download.max_inflight_per_host`：单 host 并发上限
 - `service.download_loop.max_queries_per_cycle`：每个 loop 最多消费多少 query
+- `service.download_loop.max_queries_per_cycle: 0`：表示不限制，当前能跑多少就跑多少
 - `service.download_loop.auto_seed_if_empty`：空库时自动 `seed-queries`
 - `service.download_loop.auto_refill_done_queries`：`pending/retry` 用完后是否自动回填已完成 query
 - `service.download_loop.refill_batch_size`：每次回填多少条 query
+- `service.download_loop.refill_batch_size: 0`：表示本轮尽可能多回填
 - `service.download_loop.query_recycle_cooldown_sec`：query 重新进入队列前的冷却时间
 - `service.download_loop.max_runs_per_query`：每条 query 最多允许跑多少轮，`0` 表示无限制
 - `service.download_loop.poll_interval_sec`
@@ -158,8 +161,12 @@ python scripts/run_pipeline.py \
 - `service.pipeline_loop.annotation_batch_size`：每次派发多少 clip 给标注 worker
 - `service.pipeline_loop.annotation_trigger_timeout_sec`：待标注队列没攒够也最多等多久
 - `service.pipeline_loop.queue_max_clips`：待标注队列上限，超过后会暂停继续 claim 新视频
+- `service.pipeline_loop.preprocess_claim_limit: 0`：表示只要有空闲预处理 worker 就持续吃视频
+- `service.pipeline_loop.annotation_trigger_size: 0`：表示只要有 accepted clip 就立即派发标注
+- `service.pipeline_loop.annotation_batch_size: 0`：表示每轮尽量把空闲标注 worker 填满
+- `service.pipeline_loop.queue_max_clips: 0`：表示不设待标注队列上限
 
-当前完整示例 profile 默认就是“download 单独进程 + preprocess/annotate 联动流水线 + VLLM 并行请求”的配置。
+当前完整示例 profile 默认就是“download 尽可能多抓 + pipeline 只要有视频/clip就处理 + VLLM 并行请求”的配置。
 
 ## `status` 解读
 
