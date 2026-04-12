@@ -27,8 +27,8 @@ crawl:
     index: 0
   download:
     enabled: true
-    workers: 4
-    max_inflight_per_host: 4
+    workers: 8
+    max_inflight_per_host: 8
     retries: 8
     fragment_retries: 8
     socket_timeout_sec: 30
