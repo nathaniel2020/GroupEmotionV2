@@ -7,6 +7,7 @@ from openpyxl import Workbook
 
 from group_emotion_video.cli import main as cli_main
 from group_emotion_video.ids import make_query_id, make_seed_id
+from group_emotion_video.ids import make_video_uid
 from group_emotion_video.legacy_runtime_import import LegacyRuntimeImporter
 from group_emotion_video.local_registry import LocalVideoRegistry
 from group_emotion_video.types import CandidateVideo, DownloadResult
@@ -475,6 +476,145 @@ def test_service_loops_process_download_and_pipeline(tmp_path: Path) -> None:
     assert pipeline_status["clips"]["pending_annotation"] == 0
     assert pipeline_status["clips"]["annotating"] == 0
     assert pipeline_status["annotations"]["done"] == 1
+
+
+def test_status_counts_inflight_downloads_and_download_loop_logs_are_stage_scoped(tmp_path: Path) -> None:
+    excel_path = tmp_path / "原子情感因素.xlsx"
+    schema_path = tmp_path / "schema.json"
+    label_seed_path = tmp_path / "labels.json"
+    _write_seed_excel(excel_path)
+    _write_schema_json(schema_path)
+    label_seed_path.write_text(json.dumps({"labels": ["Joy", "Anxiety"]}, ensure_ascii=False), encoding="utf-8")
+
+    config = {
+        "project": {
+            "name": "test_project",
+            "root_dir": str(tmp_path),
+            "data_dir": "data",
+            "runtime_dir": "runtime",
+            "reference_dir": "data/reference",
+            "query_seed_catalog_path": "data/reference/query_seed_catalog.json",
+            "annotation_domains_path": "data/reference/annotation_domains.json",
+            "query_seed_excel_path": str(excel_path),
+            "query_seed_sheet_name": "情感因素",
+            "annotation_schema_source_path": str(schema_path),
+            "group_emotion_label_seed_path": str(label_seed_path),
+        },
+        "sources": {
+            "default": "bilibili",
+            "bilibili": {"enabled": True, "max_pages_per_query": 1, "max_items_per_query": 3},
+        },
+        "crawl": {
+            "max_queries_per_run": 10,
+            "min_duration_sec": 15,
+            "max_duration_sec": 1200,
+            "max_video_size_mb": 300,
+            "enrich_workers": 1,
+            "max_items_per_query": 3,
+            "download": {"enabled": True, "workers": 1, "max_inflight_per_host": 1, "retries": 1, "fragment_retries": 1, "socket_timeout_sec": 10},
+        },
+        "preprocessing": {
+            "max_videos_per_run": 5,
+            "workers": 1,
+            "prefer_subtitles": True,
+            "fixed_window_sec": 12,
+            "overlap_sec": 2,
+            "subtitle_target_min_sec": 8,
+            "subtitle_target_max_sec": 15,
+            "min_clip_duration_sec": 4,
+            "max_clip_duration_sec": 20,
+            "clip_export_mode": "copy",
+            "keyframe_count": 2,
+            "use_llm_filter": False,
+            "duplicate_overlap_threshold": 0.8,
+        },
+        "annotation": {"max_clips_per_run": 10, "clip_workers": 2, "min_overall_confidence": 0.6, "export_requires_review_clear": False},
+        "llm": {
+            "enabled": False,
+            "base_url": "https://yunwu.ai/v1/",
+            "api_key_env": "YUNWU_API_KEY",
+            "model": "gemini-3.1-pro-preview",
+            "timeout_sec": 30,
+            "temperature": 0.1,
+            "max_images_per_prompt": 2,
+            "parallel": {"enabled": True, "max_inflight_requests": 2, "acquire_timeout_sec": 30},
+        },
+        "service": {
+            "download_loop": {"max_queries_per_cycle": 10, "poll_interval_sec": 0.01, "idle_sleep_sec": 0.01, "max_cycles": 1, "stop_when_idle": False},
+            "pipeline_loop": {
+                "preprocess_claim_limit": 1,
+                "annotation_trigger_size": 1,
+                "annotation_batch_size": 1,
+                "annotation_trigger_timeout_sec": 0,
+                "queue_max_clips": 8,
+                "poll_interval_sec": 0.01,
+                "idle_sleep_sec": 0.01,
+                "max_cycles": 0,
+                "stop_when_idle": True,
+            },
+        },
+    }
+
+    workflow = Workflow(config, adapter=FakeBilibiliAdapter(), annotator=FakeAnnotator())
+    video_uid = make_video_uid("bilibili", "BV_INFLIGHT_001")
+    workflow.video_repo.upsert(
+        {
+            "video_uid": video_uid,
+            "platform": "bilibili",
+            "bvid": "BV_INFLIGHT_001",
+            "url": "https://www.bilibili.com/video/BV_INFLIGHT_001",
+            "title": "下载中样本",
+            "uploader": "tester",
+            "publish_time": "2026-04-13T00:00:00",
+            "duration_sec": 36.0,
+            "cover_url": None,
+            "description": "downloading",
+            "tags": [],
+            "categories": [],
+            "view_count": 1,
+            "like_count": 1,
+            "comment_count": 0,
+            "play_count": 1,
+            "danmaku_count": 0,
+            "type": "education",
+            "webpage_url": "https://www.bilibili.com/video/BV_INFLIGHT_001",
+            "query_id": "q1",
+            "scene_text": "教室",
+            "trigger_text": "表扬",
+            "source_excel_row": 1,
+            "subtitles_available": False,
+            "rights_status": "unknown",
+            "download_status": "downloading",
+            "download_started_at": "2026-04-13T00:00:00",
+            "download_finished_at": None,
+            "download_elapsed_sec": None,
+            "reject_reason": None,
+            "retention_status": None,
+            "accepted_clip_count": 0,
+            "preprocess_started_at": None,
+            "preprocess_finished_at": None,
+            "preprocess_elapsed_sec": None,
+            "raw_video_path": None,
+            "video_meta_path": str(tmp_path / "video_meta.json"),
+            "platform_metadata": {},
+            "extra": {},
+        }
+    )
+
+    status = workflow.status()
+    assert status["videos"]["downloading"] == 1
+
+    workflow.download_loop()
+    download_messages = []
+    for line in Path(workflow.log_path).read_text(encoding="utf-8").splitlines():
+        if " download-loop " not in line:
+            continue
+        download_messages.append(line.split(" download-loop ", 1)[1])
+    assert download_messages
+    payload = json.loads(download_messages[-1])
+    assert "annotations" not in payload
+    assert "clips" not in payload
+    assert payload["avg_sec"] == {"download_per_downloaded_video": None}
 
 
 def test_register_local_videos_can_feed_preprocess(tmp_path: Path, monkeypatch) -> None:

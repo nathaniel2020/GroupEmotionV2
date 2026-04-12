@@ -380,7 +380,7 @@ class VideoRepository:
             SELECT
               COUNT(*) AS total_videos,
               SUM(CASE WHEN download_status='downloaded' THEN 1 ELSE 0 END) AS downloaded_videos,
-              SUM(CASE WHEN download_status='downloaded' AND download_started_at IS NOT NULL AND download_finished_at IS NULL THEN 1 ELSE 0 END) AS downloading_videos,
+              SUM(CASE WHEN download_status='downloading' AND download_started_at IS NOT NULL AND download_finished_at IS NULL THEN 1 ELSE 0 END) AS downloading_videos,
               SUM(CASE WHEN download_status='downloaded' AND raw_video_path IS NOT NULL AND COALESCE(retention_status, '')='' AND preprocess_started_at IS NULL AND preprocess_finished_at IS NULL THEN 1 ELSE 0 END) AS pending_preprocess_videos,
               SUM(CASE WHEN preprocess_started_at IS NOT NULL AND preprocess_finished_at IS NULL THEN 1 ELSE 0 END) AS preprocessing_videos,
               SUM(CASE WHEN preprocess_finished_at IS NOT NULL THEN 1 ELSE 0 END) AS processed_videos,

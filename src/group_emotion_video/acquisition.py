@@ -458,21 +458,29 @@ class AcquisitionService:
         pending_queries = self.query_repo.list_pending(limit if limit is not None else int(self.config["crawl"]["max_queries_per_run"]))
         processed = 0
         for query in pending_queries:
+            query_started_clock = time.perf_counter()
             search_query = build_search_query(query)
             candidates = self.adapter.search(search_query, int(self.config["crawl"]["max_items_per_query"]))
             hit_count = len(candidates)
             accepted_for_download: list[CandidateVideo] = []
-            enriched_by_bvid: dict[str, CandidateVideo] = {}
+            existing_skipped = 0
+            shard_skipped = 0
+            rejected_before_download = 0
+            downloaded_count = 0
+            download_failed_count = 0
+            download_rejected_count = 0
             with ThreadPoolExecutor(max_workers=int(self.config["crawl"].get("enrich_workers", 2))) as executor:
-                futures = {
-                    executor.submit(self.adapter.enrich, candidate): candidate.platform_video_id
-                    for candidate in candidates
-                    if not self.video_repo.exists(candidate.platform_video_id)
-                    and self._owns_video_id(candidate.platform, candidate.platform_video_id)
-                }
+                futures = {}
+                for candidate in candidates:
+                    if self.video_repo.exists(candidate.platform_video_id):
+                        existing_skipped += 1
+                        continue
+                    if not self._owns_video_id(candidate.platform, candidate.platform_video_id):
+                        shard_skipped += 1
+                        continue
+                    futures[executor.submit(self.adapter.enrich, candidate)] = candidate.platform_video_id
                 for future in as_completed(futures):
                     enriched = future.result()
-                    enriched_by_bvid[enriched.platform_video_id] = enriched
                     reason = self._reject_reason(enriched)
                     video_uid = make_video_uid(enriched.platform, enriched.platform_video_id)
                     if reason:
@@ -488,6 +496,7 @@ class AcquisitionService:
                         self._write_video_rejection(payload, video_uid=video_uid)
                         self.video_repo.upsert({**payload, "video_meta_path": str(video_meta_path)})
                         self.video_repo.add_download_event(video_uid, "rejected", error_message=reason)
+                        rejected_before_download += 1
                         processed += 1
                     else:
                         accepted_for_download.append(enriched)
@@ -536,6 +545,12 @@ class AcquisitionService:
                             if path.exists():
                                 path.unlink()
                             result = DownloadResult(status="rejected", error_message=reject_reason)
+                        if result.status == "downloaded":
+                            downloaded_count += 1
+                        elif result.status == "rejected":
+                            download_rejected_count += 1
+                        else:
+                            download_failed_count += 1
                         payload = self._serialize_video_meta(
                             candidate,
                             query=query,
@@ -566,4 +581,19 @@ class AcquisitionService:
                         )
                         processed += 1
             self.query_repo.mark_done(query["query_id"], hit_count)
+            if self.logger:
+                self.logger.info(
+                    "crawl_query query_id=%s search_query=%s hits=%s existing_skipped=%s shard_skipped=%s rejected_before_download=%s queued_for_download=%s downloaded=%s download_failed=%s download_rejected=%s elapsed_sec=%s",
+                    query["query_id"],
+                    search_query,
+                    hit_count,
+                    existing_skipped,
+                    shard_skipped,
+                    rejected_before_download,
+                    len(accepted_for_download),
+                    downloaded_count,
+                    download_failed_count,
+                    download_rejected_count,
+                    round(time.perf_counter() - query_started_clock, 3),
+                )
         return processed

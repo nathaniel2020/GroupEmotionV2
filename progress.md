@@ -125,3 +125,13 @@
   - 为 `status["annotations"]` 增加 `top_quality_flags`，便于定位 accepted clip 为什么全部进入 `failed` 而不是 `done/rejected`。
   - 执行 `python3 -m pytest -q tests/test_preprocessing.py tests/test_workflow.py`。
   - 执行 `python3 -m pytest -q`，`22 passed`。
+
+### Phase 11: Download Loop Logging Diagnostics
+- **Status:** complete
+- Actions taken:
+  - 修正 `VideoRepository.summary()` 的 `downloading` 聚合条件，使 in-flight 下载不再被统计为 0。
+  - 收紧 `download-loop` 快照日志，只保留 query / video 下载侧计数与下载均时，避免把 pipeline 统计误印到下载日志。
+  - 为 `AcquisitionService.crawl()` 增加 `crawl_query` 摘要日志，输出 `hits / existing_skipped / shard_skipped / queued_for_download / downloaded / download_failed / download_rejected / elapsed_sec`。
+  - 新增回归测试，覆盖 in-flight 下载计数与 `download-loop` 日志口径。
+  - 执行 `python3 -m pytest -q tests/test_workflow.py`，`12 passed`。
+  - 执行 `python3 -m pytest -q`，`25 passed`。

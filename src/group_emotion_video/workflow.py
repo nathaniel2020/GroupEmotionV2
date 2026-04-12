@@ -451,26 +451,43 @@ class Workflow:
         wait(active, timeout=max(timeout_sec, 0.1), return_when=FIRST_COMPLETED)
 
     def _log_loop_snapshot(self, loop_name: str, cycle: int, snapshot: dict[str, Any], extras: dict[str, Any] | None = None) -> None:
-        payload = {
-            "cycle": cycle,
-            "queries": snapshot["queries"],
-            "videos": {
-                "downloading": snapshot["videos"].get("downloading"),
-                "downloaded": snapshot["videos"].get("downloaded"),
-                "pending_preprocess": snapshot["videos"].get("pending_preprocess"),
-                "preprocessing": snapshot["videos"].get("preprocessing"),
-                "processed": snapshot["videos"].get("processed"),
-            },
-            "clips": {
-                "accepted": snapshot["clips"].get("accepted"),
-                "pending_annotation": snapshot["clips"].get("pending_annotation"),
-                "annotating": snapshot["clips"].get("annotating"),
-                "rejected": snapshot["clips"].get("rejected"),
-                "oldest_pending_age_sec": snapshot["clips"].get("oldest_pending_age_sec"),
-            },
-            "annotations": snapshot["annotations"],
-            "avg_sec": snapshot["average_durations_sec"],
-        }
+        if loop_name == "download-loop":
+            payload = {
+                "cycle": cycle,
+                "queries": snapshot["queries"],
+                "videos": {
+                    "downloading": snapshot["videos"].get("downloading"),
+                    "downloaded": snapshot["videos"].get("downloaded"),
+                    "pending_preprocess": snapshot["videos"].get("pending_preprocess"),
+                },
+                "avg_sec": {
+                    "download_per_downloaded_video": snapshot["average_durations_sec"].get("download_per_downloaded_video"),
+                },
+            }
+        else:
+            payload = {
+                "cycle": cycle,
+                "videos": {
+                    "pending_preprocess": snapshot["videos"].get("pending_preprocess"),
+                    "preprocessing": snapshot["videos"].get("preprocessing"),
+                    "processed": snapshot["videos"].get("processed"),
+                },
+                "clips": {
+                    "accepted": snapshot["clips"].get("accepted"),
+                    "pending_annotation": snapshot["clips"].get("pending_annotation"),
+                    "annotating": snapshot["clips"].get("annotating"),
+                    "rejected": snapshot["clips"].get("rejected"),
+                    "top_rejection_reasons": snapshot["clips"].get("top_rejection_reasons"),
+                    "oldest_pending_age_sec": snapshot["clips"].get("oldest_pending_age_sec"),
+                },
+                "annotations": snapshot["annotations"],
+                "avg_sec": {
+                    "preprocess_per_processed_video": snapshot["average_durations_sec"].get("preprocess_per_processed_video"),
+                    "preprocess_per_accepted_clip": snapshot["average_durations_sec"].get("preprocess_per_accepted_clip"),
+                    "annotate_per_completed_clip": snapshot["average_durations_sec"].get("annotate_per_completed_clip"),
+                    "annotate_per_done_clip": snapshot["average_durations_sec"].get("annotate_per_done_clip"),
+                },
+            }
         if extras:
             payload["extras"] = extras
         self.logger.info("%s %s", loop_name, json.dumps(payload, ensure_ascii=False, sort_keys=True))

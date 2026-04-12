@@ -65,6 +65,32 @@ def test_l2_filter_uses_metadata_when_subtitles_are_dialogue_only(tmp_path: Path
     assert scores["metadata_emotion_signal_score"] == 1.0
 
 
+def test_l2_filter_accepts_when_only_one_signal_is_present(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    video_record = {
+        "title": "获奖名单公布",
+        "description": "",
+        "tags": [],
+        "scene_text": "固定座位空间（教室/考场）",
+        "trigger_text": "公开正面能力认可（当众表扬/荣誉称号）",
+    }
+    window = {
+        "start_sec": 0.0,
+        "end_sec": 10.0,
+        "segmentation_mode": "subtitle",
+        "transcript_segments": [
+            {"segment_id": "seg1", "start": 0.0, "end": 5.0, "text": "名单公布"},
+            {"segment_id": "seg2", "start": 5.0, "end": 10.0, "text": "获得荣誉称号"},
+        ],
+    }
+
+    accepted, scores, reasons = service._l2_filter(video_record, window)
+
+    assert accepted
+    assert reasons == []
+    assert scores["emotion_signal_score"] == 1.0
+
+
 def test_clip_summary_reports_top_rejection_reasons(tmp_path: Path) -> None:
     db = SQLiteDB(tmp_path / "runtime" / "index.sqlite")
     initialize_schema(db)

@@ -136,3 +136,29 @@ def test_validate_annotation_allows_rejected_only_sentinels_only_for_rejected() 
     )
     assert not fatal_rejected
     assert "schema_invalid_enum" not in flags_rejected
+
+
+def test_validate_annotation_coerces_confidence_percent_and_enum_variants() -> None:
+    annotation, confidence, flags, fatal = validate_annotation(
+        annotation={
+            "group_size_estimate": "small",
+            "group_behavior_type": "watching",
+            "group_emotion": "anxiety",
+            "trigger_event_type": "speech act",
+            "trigger_event_description": "teacher announcement",
+            "valence": 7.0,
+            "arousal": "6.0",
+        },
+        field_confidence={"overall": 85, "group_emotion": "90"},
+        domains=DOMAINS,
+        annotation_status="done",
+    )
+    assert not fatal
+    assert not flags
+    assert annotation["group_size_estimate"] == "small(3-10)"
+    assert annotation["group_emotion"] == "Anxiety"
+    assert annotation["trigger_event_type"] == "speech_act"
+    assert annotation["valence"] == 7
+    assert annotation["arousal"] == 6
+    assert confidence["overall"] == 0.85
+    assert confidence["group_emotion"] == 0.9

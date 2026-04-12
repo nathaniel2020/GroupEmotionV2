@@ -245,9 +245,11 @@ class PreprocessingService:
             "metadata_emotion_signal_score": metadata_emotion_score,
         }
         reasons: list[str] = []
-        if group_score <= 0.0:
+        use_llm_filter = bool(self.config["preprocessing"].get("use_llm_filter", False))
+        hard_reject = group_score <= 0.0 and (emotion_score <= 0.0 and not use_llm_filter)
+        if hard_reject and group_score <= 0.0:
             reasons.append("weak_group_signal")
-        if emotion_score <= 0.0 and not bool(self.config["preprocessing"].get("use_llm_filter", False)):
+        if hard_reject and emotion_score <= 0.0 and not use_llm_filter:
             reasons.append("weak_emotion_signal")
         return (not reasons), scores, reasons
 

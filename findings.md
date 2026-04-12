@@ -46,6 +46,8 @@
 - 真实线上统计显示 `weak_emotion_signal` 仍然远高于其他 reject 原因，说明主要瓶颈已经从“字幕/元信息只看一边”收敛为“词表覆盖不足”。
 - 已继续扩展 L2 群体/情绪词表，补入更接近真实 query 和 B 站标题的事件词，如 `表扬/荣誉/获奖/淘汰/拒稿/录取/冲突/争吵/庆祝/鼓掌` 等。
 - 已扩展 `AnnotationRepository.summary()`：`status["annotations"]` 现在会返回 `top_quality_flags`，便于直接判断 `failed` 是死在 `schema_invalid_enum`、`low_confidence` 还是其他校验。
+- 已确认 `VideoRepository.summary()` 里 `downloading` 统计条件此前写错成了 `download_status='downloaded'`；实际下载中记录写的是 `download_status='downloading'`，这会导致 `download-loop` 日志长期显示 `downloading: 0`。
+- 已把 `download-loop` 快照改成下载侧专用视图，不再混入 `clips/annotations` 与预处理/标注均时；同时为 `crawl()` 增加单 query 摘要日志，直接区分“真下载慢”和“重复命中旧视频导致空转”。
 
 ## Known Gaps
 
