@@ -1,4 +1,3 @@
-from .pipeline import LightweightPipeline
+__all__ = ["__version__"]
 
-__all__ = ["LightweightPipeline"]
-
+__version__ = "0.1.0"

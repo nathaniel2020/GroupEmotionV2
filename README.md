@@ -1,73 +1,95 @@
-# Group Emotion Video Lite
+# 群体情感视频轻量化流水线
 
-这是 `013.01 video` 的轻量化重构起点。目标不是立刻复刻原项目的全链路能力，而是先把最容易失控的部分收紧：
+当前仓库已经按 `013.02` 方案落地为一条轻量但完整的生产链路：
 
-- 流程先收缩成 `sample -> annotate -> review -> export`
-- 标注质量先依靠“证据约束 + 低置信回流 + 人工抽检”保障
-- 多模态大模型调用先统一到一个 OpenAI-compatible 客户端
-- 日志先做到“每次运行、每次请求、每次失败”都能回放
+`prepare-reference -> seed-queries -> crawl -> preprocess -> annotate -> export`
 
-## 为什么先这样做
+核心约束：
 
-参考项目已经验证了完整流程的方向，但当前复杂度偏高：
+- 运行期只读取本地 reference JSON，不再重复解析 Excel。
+- B 站采集支持并行 enrich 和并行下载。
+- LLM 调用支持全局并发闸门，所有 stage 共用同一上限。
+- 标注输出兼容 `013.01` 形态：`agent_outputs`、`final_annotation`、`field_confidence`、`quality_flags`。
+- raw source video 只做临时文件，处理完成后删除；accepted clip 保留，rejected clip 删除。
 
-- 自动 query 调度、采集、预处理、标注、lineage 同时推进，排障面太大
-- 大模型调用失败时缺少稳定的请求/响应留档，问题定位效率低
-- 质量控制点分散在多个阶段，导致改一处要牵动整条链路
+## 环境要求
 
-因此这个版本优先做一条更短、可审计、可恢复的最小主链路。
+- Python `>=3.11`
+- `ffmpeg`
+- 网络可访问 B 站和所配置的大模型服务
+- 若启用 LLM：设置环境变量 `YUNWU_API_KEY` 或对应 `llm.api_key_env`
 
-## 简化后的主流程
-
-1. 准备一个 `sample.json`
-   包含 `sample_id`、候选关键帧、可选 transcript、可选远程视频 URL。
-2. 运行一次标注
-   模型必须输出结构化 JSON，并给出字段级证据与置信度。
-3. 进入复核队列
-   当低置信、字段冲突、证据不足时，自动进入 `needs_review`。
-4. 导出
-   仅导出 `approved` 样本，附带日志索引与原始响应路径。
-
-## 目录
-
-```text
-configs/         基础配置
-docs/            重构与方法文档
-prompts/         Prompt 模板
-scripts/         命令行入口
-src/             轻量代码骨架
-tests/           后续补测试
-data/            原始/中间/处理后数据目录
-runtime/         运行期产物
-```
-
-## 快速开始
-
-安装依赖：
+安装：
 
 ```bash
-python3 -m pip install -e .
+pip install -e .
 ```
 
-查看流程说明：
+## 配置
+
+基础配置在 [configs/base.yaml](configs/base.yaml)。
+
+默认包含：
+
+- Excel 种子来源：`原子情感因素.xlsx`
+- schema 来源：`013.01 video/doc/标注字段.xlsx`
+- B 站下载并发：`crawl.download.workers`
+- 预处理并发：`preprocessing.workers`
+- clip 标注并发：`annotation.clip_workers`
+- 全局 LLM 请求并发：`llm.parallel.max_inflight_requests`
+
+烟雾测试 profile 在 [configs/profiles/gemini_yunwu_smoke.yaml](configs/profiles/gemini_yunwu_smoke.yaml)。
+
+## 运行
+
+先准备 reference：
 
 ```bash
-python3 scripts/run_pipeline.py plan
+python scripts/run_pipeline.py prepare-reference
 ```
 
-查看示例标注请求：
+然后按阶段运行：
 
 ```bash
-python3 scripts/run_pipeline.py annotate \
-  --sample data/interim/example_sample.json \
-  --dry-run
+python scripts/run_pipeline.py seed-queries
+python scripts/run_pipeline.py crawl
+python scripts/run_pipeline.py preprocess
+python scripts/run_pipeline.py annotate
+python scripts/run_pipeline.py export
+python scripts/run_pipeline.py status
 ```
 
-## 关键约束
+也可以一次串起来：
 
-- 默认不把本地原视频直接塞给模型；优先发关键帧和 transcript，降低多模态失败率。
-- 每次模型调用都会生成单独的 `request.json`、`response.json` 和 `events.jsonl` 记录。
-- 质量控制优先做减法：先用一个主模型 + 一个裁决规则，而不是多智能体并发堆叠。
+```bash
+python scripts/run_pipeline.py run --steps prepare-reference,seed-queries,crawl,preprocess,annotate,export,status
+```
 
-详细设计见 [docs/轻量化重构方案.md](/Users/aidan/Home/Code/010-019论文项目/013-群体情感/013.02%20video/docs/轻量化重构方案.md) 和 [docs/日志与多模态调用规范.md](/Users/aidan/Home/Code/010-019论文项目/013-群体情感/013.02%20video/docs/日志与多模态调用规范.md)。
+叠加 profile：
 
+```bash
+python scripts/run_pipeline.py --config configs/profiles/gemini_yunwu_smoke.yaml run --steps prepare-reference,seed-queries,crawl,preprocess,annotate
+```
+
+## 目录约定
+
+- `data/reference/`
+  - `query_seed_catalog.json`
+  - `annotation_domains.json`
+- `runtime/index.sqlite`
+- `runtime/artifacts/videos/`
+- `runtime/artifacts/clips/`
+- `runtime/artifacts/annotations/`
+- `runtime/artifacts/rejections/`
+- `runtime/exports/`
+
+## 当前实现范围
+
+- 已实现离线可测的 reference 准备、query 入库、B 站候选采集、并行下载、切分/过滤、并行标注、导出。
+- 标注字段值域做了严格校验，accepted 样本必须通过 schema 检查。
+- 测试已覆盖 reference 生成、值域校验、LLM 并发闸门、离线 E2E。
+
+当前未覆盖：
+
+- 线上真实 B 站抓取与真实模型调用的集成冒烟尚未在本轮执行。
+- `ffmpeg` 缺失时，`clip_export_mode=ffmpeg` 无法工作；测试里使用的是 `copy` 模式。

@@ -1,0 +1,45 @@
+project:
+  data_dir: runtime/online_smoke/data
+  runtime_dir: runtime/online_smoke
+  reference_dir: runtime/online_smoke/reference
+  query_seed_catalog_path: runtime/online_smoke/reference/query_seed_catalog.json
+  annotation_domains_path: runtime/online_smoke/reference/annotation_domains.json
+
+sources:
+  bilibili:
+    max_pages_per_query: 1
+    max_items_per_query: 2
+    search_timeout_sec: 20
+    enrich_timeout_sec: 30
+
+crawl:
+  max_queries_per_run: 3
+  max_items_per_query: 1
+  enrich_workers: 1
+  download:
+    enabled: true
+    workers: 1
+    max_inflight_per_host: 1
+    retries: 3
+    fragment_retries: 3
+    socket_timeout_sec: 20
+
+preprocessing:
+  max_videos_per_run: 1
+  workers: 1
+  keyframe_count: 2
+
+annotation:
+  max_clips_per_run: 1
+  clip_workers: 1
+  min_overall_confidence: 0.5
+
+llm:
+  enabled: true
+  model: gemini-3.1-flash-lite-preview
+  timeout_sec: 180
+  max_images_per_prompt: 0
+  parallel:
+    enabled: true
+    max_inflight_requests: 1
+    acquire_timeout_sec: 180

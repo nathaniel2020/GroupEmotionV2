@@ -2,51 +2,47 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import Any
 
-from .config import load_config
-from .logging_utils import RunLogger
-from .pipeline import LightweightPipeline
+from .workflow import Workflow
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Lightweight group emotion video pipeline")
-    parser.add_argument("--config", action="append", default=[], help="Override config path. Repeatable.")
-
+    parser = argparse.ArgumentParser(prog="group-emotion-video")
+    parser.add_argument("--config", action="append", dest="config_paths", default=[])
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("plan", help="Print the simplified workflow")
+    for name in ("prepare-reference", "seed-queries", "crawl", "preprocess", "annotate", "export", "status"):
+        subparsers.add_parser(name)
 
-    annotate_parser = subparsers.add_parser("annotate", help="Annotate one sample manifest")
-    annotate_parser.add_argument("--sample", required=True, help="Path to a sample JSON file")
-    annotate_parser.add_argument("--dry-run", action="store_true", help="Skip live LLM call and write stub output")
-
-    subparsers.add_parser("status", help="Summarize current outputs")
+    run_parser = subparsers.add_parser("run")
+    run_parser.add_argument("--steps", required=True, help="Comma-separated steps")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    config = load_config(args.config)
-    run_logger = RunLogger(config, stage=args.command)
-    pipeline = LightweightPipeline(config, run_logger)
+    workflow = Workflow.from_config_paths(args.config_paths)
 
-    try:
-        if args.command == "plan":
-            payload: Any = {"stages": pipeline.describe()}
-        elif args.command == "annotate":
-            payload = pipeline.annotate_sample(args.sample, dry_run=bool(args.dry_run))
-        elif args.command == "status":
-            payload = pipeline.status()
-        else:  # pragma: no cover
-            raise ValueError(f"Unsupported command: {args.command}")
+    if args.command == "prepare-reference":
+        result = workflow.prepare_reference()
+    elif args.command == "seed-queries":
+        result = workflow.seed_queries()
+    elif args.command == "crawl":
+        result = workflow.crawl()
+    elif args.command == "preprocess":
+        result = workflow.preprocess()
+    elif args.command == "annotate":
+        result = workflow.annotate()
+    elif args.command == "export":
+        result = workflow.export()
+    elif args.command == "status":
+        result = workflow.status()
+    elif args.command == "run":
+        steps = [step.strip() for step in args.steps.split(",") if step.strip()]
+        result = workflow.run(steps)
+    else:  # pragma: no cover
+        raise ValueError(f"Unsupported command: {args.command}")
 
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        run_logger.finalize("completed", summary={"command": args.command})
-        return 0
-    except Exception as exc:
-        run_logger.error("command_failed", exc, command=args.command)
-        run_logger.finalize("failed", summary={"command": args.command, "error": str(exc)})
-        return 1
-
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0

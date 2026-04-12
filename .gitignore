@@ -3,13 +3,22 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+build/
+dist/
+*.egg-info/
 
 data/raw/*
 data/interim/*
 data/processed/*
+data/reference/*
 runtime/*
 
 !data/raw/.gitkeep
 !data/interim/.gitkeep
 !data/processed/.gitkeep
+!data/reference/.gitkeep
 !runtime/.gitkeep

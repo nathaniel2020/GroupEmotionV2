@@ -1,16 +1,38 @@
-# Findings
+# Findings & Decisions
 
-## 参考项目提炼
+## Implemented Findings
 
-- 主链路已经扩展到 `scene -> query -> crawl -> video -> preprocess -> clip -> annotate -> lineage/export`，适合长期建设，不适合作为当前重构起点。
-- 参考项目的 `llm.py` 已经处理了不少 OpenAI-compatible 细节，但视频输入模式较多，失败面也更广。
-- 参考项目的 `logging_utils.py` 只有基础文件日志，尚不足以支撑“失败请求回放”。
-- `annotation/service.py` 表明最终质量控制已经有 `quality_flags` 和失败落盘思路，这部分值得保留并进一步前移。
+- 当前主链路已恢复为完整流程，不再是旧版仅标注链路。
+- Excel 参考源已收敛为一次性解析，运行期只消费本地 `query_seed_catalog.json`。
+- 标注 schema 已冻结为本地 `annotation_domains.json`，并单独补入 `group_emotion` 标签池。
+- B 站采集采用“搜索串行、enrich 并行、下载并行”的轻量并发模型。
+- clip 预处理后，raw source video 会被清理；rejected clip 的视频和派生工件不会保留。
+- 标注输出已经与 `013.01` 的核心 runtime 形态兼容，并额外做了严格值域约束。
 
-## 本项目的最小策略
+## Code-Level Decisions
 
-- 收缩输入单位：先统一成 `sample.json`，避免采集和预处理成为当前阻塞。
-- 收缩调用形态：优先关键帧 + transcript，减少直接视频上传导致的协议和体积问题。
-- 扩展日志粒度：把 run、event、llm request、llm response、llm error 拆开记录。
-- 保留质量闭环：要求字段级证据、字段级置信度、低置信回流和人工抽检。
+| Decision | Rationale |
+|----------|-----------|
+| 用单个 `runtime/index.sqlite` 管索引和状态 | 简化实现，避免多库管理成本 |
+| 用 JSON 工件保留元信息、切分、拒绝原因和标注结果 | 保持样本级可溯源 |
+| LLM 并发通过全局 `BoundedSemaphore` 控制 | 防止不同 stage 各自失控并发 |
+| `openai`、`requests`、`yt-dlp` 均做懒加载 | 离线测试无需真实联网依赖 |
+| `clip_export_mode` 支持 `copy` 和 `ffmpeg` | 便于测试和生产两种运行模式 |
+| SQLite 改为 `check_same_thread=False + RLock + WAL` | 修复预处理线程池下的并发访问问题 |
 
+## Validation Findings
+
+- `prepare-reference` 可稳定生成 query seed catalog 和 annotation domains。
+- 值域校验可拦截 enum 越界、数值越界和条件必填缺失。
+- LLM 并发闸门能限制真实 in-flight 请求数。
+- 离线 E2E 已验证从 seed row 到 accepted clip 导出的一条完整链路。
+- 在线 smoke 已验证从真实 B 站搜索、下载、切分、过滤、在线标注到导出的完整闭环。
+- 真实 Excel 中存在 `外部诱因空间 (X_ext)` 这类目录行，必须在 reference 准备阶段显式跳过。
+- 直接把抽象场景名原样送到 B 站搜索，召回质量很差；需要做确定性的 search normalization，优先展开括号中的具体场景词和事件词。
+- 原始 L2 `weak_emotion_signal` 启发词过窄，像“师生教室翻唱”这类明显群体情绪场景会被误拒；补入 `翻唱/合唱/演唱` 后通过。
+- `gemini-3.1-pro-preview + 图片输入` 在这个 smoke clip 上超时；`gemini-3.1-flash-lite-preview + 文本优先` 能在可接受时间内跑通。
+
+## Known Gaps
+
+- `group_emotion` 的冻结标签池目前是工程种子版，后续仍可能根据首批数据继续收敛。
+- 当前只在线跑通了 1 个 `done` 样本，样本规模还不足以评估整体召回和标注稳定性。
