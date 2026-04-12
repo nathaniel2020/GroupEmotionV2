@@ -104,7 +104,7 @@ python scripts/run_pipeline.py \
 - 从 `/mnt/.../runtime/artifacts/raw_videos/bilibili` 扫描原始视频
 - 显示终端进度条
 - 按 `move` 语义把视频转移到当前 `013.02` runtime 的 `tmp/videos/...`
-- 优先尝试读取 `013.01/runtime/db/keyword_index.db` 和 `video_meta.db`
+- 优先尝试读取 `--legacy-runtime-root` 下的 `db/keyword_index.db` 和 `db/video_meta.db`
 - 恢复 `bilibili` / `BVID` / `url` / `title` / `query` 关联等元信息
 - 在当前 `runtime/.../index.sqlite` 中写成与 `013.02` 自己下载产物同一套状态机：`download_status='downloaded'`
 
@@ -127,6 +127,10 @@ python scripts/run_pipeline.py \
 
 - 这里不需要 `--tag 群体 --tag emotion`。
 - 那两个 `--tag` 只是给通用本地导入器补文本提示，帮助无字幕视频通过预处理的弱规则过滤，不属于规范导入流程。
+- 例如当你传入 `--legacy-runtime-root /mnt/data_disk/home/liuhaoyu/GroupEmotion/runtime` 时，导入器读取的是：
+  `/mnt/data_disk/home/liuhaoyu/GroupEmotion/runtime/db/keyword_index.db`
+  和
+  `/mnt/data_disk/home/liuhaoyu/GroupEmotion/runtime/db/video_meta.db`
 - 如果源目录和当前 runtime 不在同一个文件系统，底层无法做原子 `rename`；`move` 语义会退化成“复制成功后删除源文件”，这是操作系统限制，不是导入器绕过了 `move`。
 
 推荐先准备 reference，这样命令会优先用 `query_seed_catalog.json` 去匹配场景目录名：
