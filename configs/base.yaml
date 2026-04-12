@@ -6,9 +6,9 @@ project:
   reference_dir: data/reference
   query_seed_catalog_path: data/reference/query_seed_catalog.json
   annotation_domains_path: data/reference/annotation_domains.json
-  query_seed_excel_path: /Users/aidan/Home/KnowledgeBase/000-Projects/010-019论文项目/013-群体情感/013.04 中期检查/交付材料/原子情感因素.xlsx
+  query_seed_excel_path: ../原子情感因素.xlsx
   query_seed_sheet_name: 情感因素
-  annotation_schema_source_path: /Users/aidan/Home/Code/010-019论文项目/013-群体情感/013.01 video/doc/标注字段.xlsx
+  annotation_schema_source_path: ../标注字段.xlsx
   group_emotion_label_seed_path: configs/group_emotion_labels.seed.json
 
 sources:
