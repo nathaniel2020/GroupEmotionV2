@@ -255,14 +255,11 @@ python scripts/run_pipeline.py \
 - 当 `pending` 用完时可自动 recycle 已完成 query，不需要手动重新 `seed-queries`
 - `max_queries_per_cycle: 0` 表示每轮尽可能多抓，不人为限制 query 批次
 
-如果两台机器不能通信，但你希望它们尽量不要抓到同一批视频，不要靠随机顺序，应该直接做静态分片：
+如果两台机器不能通信，但你希望它们尽量多抓视频，同时避免重复跑同一批 query，应该直接做静态 query 分片：
 
 ```yaml
 crawl:
   query_shard:
-    count: 2
-    index: 0
-  video_shard:
     count: 2
     index: 0
 ```
@@ -272,12 +269,12 @@ crawl:
 - 机器 A：`count: 2, index: 0`
 - 机器 B：`count: 2, index: 1`
 
-建议两层都开：
+当前默认连续运行 profile 只开 `query_shard`，不再默认启用 `video_shard`。
 
-- `query_shard`：把 query 队列拆开，避免两台机器重复跑同一批 query
-- `video_shard`：按 `bvid` 再做一次确定性过滤，避免同一个视频因为命中不同 query 而在两台机器都被下载
+- `query_shard`：把 query 队列拆开，避免两台机器重复跑同一批 query，同时尽量扩大整体 query 覆盖面
+- `video_shard`：如果你更在意跨机去重而不是拉高下载量，可以手动重新打开；代价是很多 query 命中会被直接裁掉，单机 `queued_for_download` 会明显下降
 
-这样两边都会基于同一份 `query_seed_catalog.json` 自动补种，但每台机器只会导入和消费自己那一片 `query_id`，并且只会下载自己负责的那一片视频，不需要互相通信。
+这样两边都会基于同一份 `query_seed_catalog.json` 自动补种，但每台机器只会导入和消费自己那一片 `query_id`。这种配置更适合“先尽量多下载，再靠后续过滤挑样本”的场景。
 
 如果是 3 台机器，就设 `count: 3`，然后三台机器的 `index` 分别为 `0`、`1`、`2`。
 

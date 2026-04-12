@@ -2,6 +2,3 @@ crawl:
   query_shard:
     count: 3
     index: 0
-  video_shard:
-    count: 3
-    index: 0

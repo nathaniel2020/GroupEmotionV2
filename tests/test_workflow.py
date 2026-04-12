@@ -615,6 +615,9 @@ def test_status_counts_inflight_downloads_and_download_loop_logs_are_stage_scope
     assert "annotations" not in payload
     assert "clips" not in payload
     assert payload["avg_sec"] == {"download_per_downloaded_video": None}
+    assert payload["extras"]["idle_reason"] == "no_pending_queries"
+    assert payload["extras"]["query_count"] == 0
+    assert payload["extras"]["hits"] == 0
 
 
 def test_register_local_videos_can_feed_preprocess(tmp_path: Path, monkeypatch) -> None:

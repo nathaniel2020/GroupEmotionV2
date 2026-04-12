@@ -261,8 +261,19 @@ class Workflow:
             cycle += 1
             refill_info = self._ensure_queries_available(cfg)
             processed = self.acquisition.crawl(limit=self._limit_from_cfg(cfg.get("max_queries_per_cycle"), fallback=int(self.config["crawl"]["max_queries_per_run"])))
+            crawl_stats = self.acquisition.last_crawl_stats()
             snapshot = self.status()
-            self._log_loop_snapshot("download-loop", cycle, snapshot, {"processed_items": processed, **refill_info})
+            self._log_loop_snapshot(
+                "download-loop",
+                cycle,
+                snapshot,
+                {
+                    "processed_items": processed,
+                    "idle_reason": self._download_loop_idle_reason(processed, crawl_stats),
+                    **crawl_stats,
+                    **refill_info,
+                },
+            )
             if self._should_stop_loop(cfg, cycle=cycle, idle=processed <= 0, snapshot=snapshot):
                 break
             time.sleep(float(cfg.get("idle_sleep_sec" if processed <= 0 else "poll_interval_sec", 5.0)))
@@ -491,6 +502,35 @@ class Workflow:
         if extras:
             payload["extras"] = extras
         self.logger.info("%s %s", loop_name, json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+    @staticmethod
+    def _download_loop_idle_reason(processed: int, crawl_stats: dict[str, Any]) -> str | None:
+        if processed > 0:
+            return None
+        query_count = int(crawl_stats.get("query_count", 0) or 0)
+        if query_count <= 0:
+            return "no_pending_queries"
+        queued_for_download = int(crawl_stats.get("queued_for_download", 0) or 0)
+        downloaded = int(crawl_stats.get("downloaded", 0) or 0)
+        download_failed = int(crawl_stats.get("download_failed", 0) or 0)
+        download_rejected = int(crawl_stats.get("download_rejected", 0) or 0)
+        rejected_before_download = int(crawl_stats.get("rejected_before_download", 0) or 0)
+        shard_skipped = int(crawl_stats.get("shard_skipped", 0) or 0)
+        existing_skipped = int(crawl_stats.get("existing_skipped", 0) or 0)
+        hits = int(crawl_stats.get("hits", 0) or 0)
+        if queued_for_download > 0 and downloaded <= 0 and (download_failed > 0 or download_rejected > 0):
+            return "downloads_failed_or_rejected"
+        if rejected_before_download > 0 and queued_for_download <= 0:
+            return "all_candidates_rejected_before_download"
+        if hits > 0 and shard_skipped == hits:
+            return "all_hits_filtered_by_video_shard"
+        if hits > 0 and existing_skipped == hits:
+            return "all_hits_already_seen"
+        if hits > 0 and existing_skipped + shard_skipped == hits:
+            return "all_hits_skipped_by_existing_or_shard"
+        if hits <= 0:
+            return "search_returned_no_hits"
+        return "no_new_downloads"
 
     @staticmethod
     def _optional_positive_int(value: Any, *, fallback: int | None) -> int | None:

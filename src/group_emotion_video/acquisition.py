@@ -119,6 +119,9 @@ class BilibiliAdapter:
                 return
             status = str(payload.get("status") or "")
             if status == "finished":
+                if last_bucket["value"] >= 10:
+                    return
+                last_bucket["value"] = 10
                 self.logger.info("download_progress bvid=%s percent=100", video_id)
                 return
             if status != "downloading":
@@ -323,6 +326,24 @@ class AcquisitionService:
         if self.video_shard_index < 0 or self.video_shard_index >= self.video_shard_count:
             raise ValueError(f"Invalid video shard index={self.video_shard_index} for shard_count={self.video_shard_count}")
         self._download_host_gate = threading.BoundedSemaphore(int(config["crawl"]["download"].get("max_inflight_per_host", 2)))
+        self._last_crawl_stats = self._new_crawl_stats()
+
+    @staticmethod
+    def _new_crawl_stats() -> dict[str, int]:
+        return {
+            "query_count": 0,
+            "hits": 0,
+            "existing_skipped": 0,
+            "shard_skipped": 0,
+            "rejected_before_download": 0,
+            "queued_for_download": 0,
+            "downloaded": 0,
+            "download_failed": 0,
+            "download_rejected": 0,
+        }
+
+    def last_crawl_stats(self) -> dict[str, int]:
+        return dict(self._last_crawl_stats)
 
     @staticmethod
     def load_query_seed_catalog(path: str | Path) -> dict[str, Any]:
@@ -455,6 +476,7 @@ class AcquisitionService:
         return result, started_at, finished_at, elapsed_sec
 
     def crawl(self, limit: int | None = None) -> int:
+        cycle_stats = self._new_crawl_stats()
         pending_queries = self.query_repo.list_pending(limit if limit is not None else int(self.config["crawl"]["max_queries_per_run"]))
         processed = 0
         for query in pending_queries:
@@ -462,6 +484,8 @@ class AcquisitionService:
             search_query = build_search_query(query)
             candidates = self.adapter.search(search_query, int(self.config["crawl"]["max_items_per_query"]))
             hit_count = len(candidates)
+            cycle_stats["query_count"] += 1
+            cycle_stats["hits"] += hit_count
             accepted_for_download: list[CandidateVideo] = []
             existing_skipped = 0
             shard_skipped = 0
@@ -500,6 +524,10 @@ class AcquisitionService:
                         processed += 1
                     else:
                         accepted_for_download.append(enriched)
+            cycle_stats["existing_skipped"] += existing_skipped
+            cycle_stats["shard_skipped"] += shard_skipped
+            cycle_stats["rejected_before_download"] += rejected_before_download
+            cycle_stats["queued_for_download"] += len(accepted_for_download)
 
             if accepted_for_download and bool(self.config["crawl"]["download"].get("enabled", True)):
                 output_root = self.layout["tmp_videos"] / _safe_dir_name(query["scene_text"])
@@ -580,6 +608,9 @@ class AcquisitionService:
                             extra={"sha256": file_sha256(result.local_path) if result.local_path and Path(result.local_path).exists() else None},
                         )
                         processed += 1
+            cycle_stats["downloaded"] += downloaded_count
+            cycle_stats["download_failed"] += download_failed_count
+            cycle_stats["download_rejected"] += download_rejected_count
             self.query_repo.mark_done(query["query_id"], hit_count)
             if self.logger:
                 self.logger.info(
@@ -596,4 +627,5 @@ class AcquisitionService:
                     download_rejected_count,
                     round(time.perf_counter() - query_started_clock, 3),
                 )
+        self._last_crawl_stats = cycle_stats
         return processed

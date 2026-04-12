@@ -7,28 +7,25 @@ project:
 
 sources:
   bilibili:
-    max_pages_per_query: 2
-    max_items_per_query: 5
+    max_pages_per_query: 6
+    max_items_per_query: 50
     search_timeout_sec: 20
     enrich_timeout_sec: 30
 
 crawl:
-  max_queries_per_run: 20
+  max_queries_per_run: 60
   min_duration_sec: 15
   max_duration_sec: 1200
   max_video_size_mb: 300
-  enrich_workers: 2
-  max_items_per_query: 5
+  enrich_workers: 4
+  max_items_per_query: 50
   query_shard:
-    count: 3
-    index: 0
-  video_shard:
     count: 3
     index: 0
   download:
     enabled: true
-    workers: 4
-    max_inflight_per_host: 4
+    workers: 8
+    max_inflight_per_host: 8
     retries: 8
     fragment_retries: 8
     socket_timeout_sec: 30
@@ -74,7 +71,7 @@ service:
     auto_seed_if_empty: true
     auto_refill_done_queries: true
     refill_batch_size: 0
-    query_recycle_cooldown_sec: 1800
+    query_recycle_cooldown_sec: 600
     max_runs_per_query: 0
     poll_interval_sec: 2
     idle_sleep_sec: 10
