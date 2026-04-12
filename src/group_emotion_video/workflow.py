@@ -162,9 +162,10 @@ class Workflow:
         cycle = 0
         while True:
             cycle += 1
+            refill_info = self._ensure_queries_available(cfg)
             processed = self.acquisition.crawl(limit=int(cfg.get("max_queries_per_cycle", self.config["crawl"]["max_queries_per_run"])))
             snapshot = self.status()
-            self._log_loop_snapshot("download-loop", cycle, snapshot, {"processed_items": processed})
+            self._log_loop_snapshot("download-loop", cycle, snapshot, {"processed_items": processed, **refill_info})
             if self._should_stop_loop(cfg, cycle=cycle, idle=processed <= 0, snapshot=snapshot):
                 break
             time.sleep(float(cfg.get("idle_sleep_sec" if processed <= 0 else "poll_interval_sec", 5.0)))
@@ -299,6 +300,25 @@ class Workflow:
 
     def _loop_cfg(self, key: str) -> dict[str, Any]:
         return dict((self.config.get("service") or {}).get(key) or {})
+
+    def _ensure_queries_available(self, cfg: dict[str, Any]) -> dict[str, Any]:
+        info = {"auto_seeded_queries": 0, "recycled_queries": 0}
+        query_summary = self.query_repo.summary()
+        if int(query_summary.get("total", 0)) == 0 and bool(cfg.get("auto_seed_if_empty", False)):
+            info["auto_seeded_queries"] = int(self.seed_queries())
+            query_summary = self.query_repo.summary()
+        if int(query_summary.get("pending", 0)) + int(query_summary.get("retry", 0)) > 0:
+            return info
+        if not bool(cfg.get("auto_refill_done_queries", False)):
+            return info
+        info["recycled_queries"] = int(
+            self.query_repo.recycle_done(
+                int(cfg.get("refill_batch_size", cfg.get("max_queries_per_cycle", self.config["crawl"]["max_queries_per_run"]))),
+                cooldown_sec=float(cfg.get("query_recycle_cooldown_sec", 0)),
+                max_runs_per_query=int(cfg.get("max_runs_per_query", 0)),
+            )
+        )
+        return info
 
     def _should_stop_loop(self, cfg: dict[str, Any], *, cycle: int, idle: bool, snapshot: dict[str, Any]) -> bool:
         max_cycles = int(cfg.get("max_cycles", 0))

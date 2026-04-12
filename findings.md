@@ -10,6 +10,7 @@
 - 标注输出已经与 `013.01` 的核心 runtime 形态兼容，并额外做了严格值域约束。
 - `status` 已扩展为可直接读吞吐的总览接口，会返回视频 / clip / 标注计数、阶段平均耗时，以及基于当前均值和 worker 的 5 天产能估算。
 - 在线运行模式已切成两个常驻命令：`download-loop` 专管下载，`pipeline-loop` 负责预处理和批量标注联动。
+- `download-loop` 现在支持 query 自动补种和自动回填，不再要求队列耗尽后手动执行 `seed-queries`。
 
 ## Code-Level Decisions
 
@@ -23,6 +24,7 @@
 | SQLite 改为 `check_same_thread=False + RLock + WAL` | 修复预处理线程池下的并发访问问题 |
 | 下载 / 预处理 / 标注耗时直接写入 SQLite 主表 | 让 `status` 无需扫日志或工件时间戳就能聚合真实吞吐 |
 | 不做单一总进度条，改做阶段快照日志 | 因为总视频数和总 clip 数在动态变化，单百分比会误导 |
+| query 调度采用 `run_count + cooldown` 的 recycle 机制 | 避免 query 一次跑完后只能靠人工重新补种 |
 
 ## Validation Findings
 

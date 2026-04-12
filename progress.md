@@ -67,6 +67,14 @@
   - 为 clips 增加创建时间、`annotating` 状态和队列年龄统计，便于做动态快照日志和批触发判断。
   - 新增完整 profile `configs/profiles/continuous_vllm_pipeline.yaml`，并重写 README 的服务模式文档。
 
+### Phase 9: Query Auto Refill
+- **Status:** complete
+- Actions taken:
+  - 为 `queries` 表补充 `run_count` 字段，并对已有 SQLite 自动迁移。
+  - `download-loop` 增加空库自动 `seed-queries` 能力。
+  - 当 `pending/retry` 用完时，按 `query_recycle_cooldown_sec` 和 `max_runs_per_query` 自动回填 `done` query。
+  - 新增自动补种 / 自动回填测试，验证 query 会在限定轮次内被重新调度。
+
 ## Test Results
 
 | Test | Result |
@@ -75,6 +83,7 @@
 | `python3 -m pytest -q` | `6 passed` |
 | `python3 -m pytest -q` | `8 passed` |
 | `python3 -m pytest -q` | `9 passed` |
+| `python3 -m pytest -q` | `10 passed` |
 | `python3 -m pytest -q tests/test_workflow.py` | passed |
 | 在线 smoke | `prepare-reference -> seed-queries -> crawl -> preprocess -> annotate -> export` | passed |
 
@@ -95,4 +104,5 @@
 - 首轮真实联网 smoke 已跑通。
 - `status` 已能直接作为 5 天产能估算入口。
 - 服务模式已支持双进程常驻运行和动态快照日志。
+- `download-loop` 已支持 query 自动补种与自动回填。
 - 下一步应扩大在线 smoke 样本数，并继续微调 query/search/filter 策略。

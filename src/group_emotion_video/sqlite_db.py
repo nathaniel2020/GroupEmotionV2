@@ -63,7 +63,8 @@ def initialize_schema(db: SQLiteDB) -> None:
             query_text TEXT NOT NULL UNIQUE,
             status TEXT NOT NULL,
             last_run_at TEXT,
-            hit_count INTEGER NOT NULL DEFAULT 0
+            hit_count INTEGER NOT NULL DEFAULT 0,
+            run_count INTEGER NOT NULL DEFAULT 0
         )
         """
     )
@@ -164,6 +165,13 @@ def initialize_schema(db: SQLiteDB) -> None:
             created_at TEXT NOT NULL
         )
         """
+    )
+    _ensure_columns(
+        db,
+        "queries",
+        {
+            "run_count": "INTEGER NOT NULL DEFAULT 0",
+        },
     )
     _ensure_columns(
         db,

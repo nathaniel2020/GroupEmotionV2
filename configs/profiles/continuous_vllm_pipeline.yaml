@@ -64,6 +64,11 @@ llm:
 service:
   download_loop:
     max_queries_per_cycle: 20
+    auto_seed_if_empty: true
+    auto_refill_done_queries: true
+    refill_batch_size: 20
+    query_recycle_cooldown_sec: 1800
+    max_runs_per_query: 0
     poll_interval_sec: 2
     idle_sleep_sec: 10
     max_cycles: 0

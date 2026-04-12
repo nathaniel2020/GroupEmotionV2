@@ -64,6 +64,33 @@ class FakeBilibiliAdapter:
         return DownloadResult(status="downloaded", local_path=str(output_path), file_size_bytes=output_path.stat().st_size)
 
 
+class CyclingFakeBilibiliAdapter(FakeBilibiliAdapter):
+    def __init__(self) -> None:
+        self._search_counter = 0
+
+    def search(self, query_text: str, limit: int):
+        self._search_counter += 1
+        suffix = f"{self._search_counter:03d}"
+        return [
+            CandidateVideo(
+                platform="bilibili",
+                platform_video_id=f"BV_TEST_{suffix}",
+                url=f"https://www.bilibili.com/video/BV_TEST_{suffix}",
+                title=f"学生群体现场欢呼 {suffix}",
+                uploader="tester",
+                publish_time="2026-04-12T10:00:00",
+                duration_sec=36.0,
+                cover_url="https://example.com/cover.jpg",
+                description="学生群体很激动，大家一起欢呼。",
+                tags=["学生", "群体", "欢呼"],
+                categories=["教育"],
+                subtitles_available=True,
+                platform_metadata={"type": "education", "view_count": 10},
+                extra={},
+            )
+        ][:limit]
+
+
 class FakeAnnotator:
     def annotate(self, clip_record):
         final_annotation = {
@@ -342,3 +369,94 @@ def test_service_loops_process_download_and_pipeline(tmp_path: Path) -> None:
     assert pipeline_status["clips"]["pending_annotation"] == 0
     assert pipeline_status["clips"]["annotating"] == 0
     assert pipeline_status["annotations"]["done"] == 1
+
+
+def test_download_loop_auto_seeds_and_recycles_queries(tmp_path: Path) -> None:
+    excel_path = tmp_path / "原子情感因素.xlsx"
+    schema_path = tmp_path / "schema.json"
+    label_seed_path = tmp_path / "labels.json"
+    _write_seed_excel(excel_path)
+    _write_schema_json(schema_path)
+    label_seed_path.write_text(json.dumps({"labels": ["Joy", "Anxiety"]}, ensure_ascii=False), encoding="utf-8")
+
+    config = {
+        "project": {
+            "name": "test_project",
+            "root_dir": str(tmp_path),
+            "data_dir": "data",
+            "runtime_dir": "runtime",
+            "reference_dir": "data/reference",
+            "query_seed_catalog_path": "data/reference/query_seed_catalog.json",
+            "annotation_domains_path": "data/reference/annotation_domains.json",
+            "query_seed_excel_path": str(excel_path),
+            "query_seed_sheet_name": "情感因素",
+            "annotation_schema_source_path": str(schema_path),
+            "group_emotion_label_seed_path": str(label_seed_path),
+        },
+        "sources": {
+            "default": "bilibili",
+            "bilibili": {"enabled": True, "max_pages_per_query": 1, "max_items_per_query": 3},
+        },
+        "crawl": {
+            "max_queries_per_run": 10,
+            "min_duration_sec": 15,
+            "max_duration_sec": 1200,
+            "max_video_size_mb": 300,
+            "enrich_workers": 1,
+            "max_items_per_query": 3,
+            "download": {"enabled": True, "workers": 1, "max_inflight_per_host": 1, "retries": 1, "fragment_retries": 1, "socket_timeout_sec": 10},
+        },
+        "preprocessing": {
+            "max_videos_per_run": 5,
+            "workers": 1,
+            "prefer_subtitles": True,
+            "fixed_window_sec": 12,
+            "overlap_sec": 2,
+            "subtitle_target_min_sec": 8,
+            "subtitle_target_max_sec": 15,
+            "min_clip_duration_sec": 4,
+            "max_clip_duration_sec": 20,
+            "clip_export_mode": "copy",
+            "keyframe_count": 2,
+            "use_llm_filter": False,
+            "duplicate_overlap_threshold": 0.8,
+        },
+        "annotation": {"max_clips_per_run": 10, "clip_workers": 2, "min_overall_confidence": 0.6, "export_requires_review_clear": False},
+        "llm": {
+            "enabled": False,
+            "base_url": "https://yunwu.ai/v1/",
+            "api_key_env": "YUNWU_API_KEY",
+            "model": "gemini-3.1-pro-preview",
+            "timeout_sec": 30,
+            "temperature": 0.1,
+            "max_images_per_prompt": 2,
+            "parallel": {"enabled": True, "max_inflight_requests": 2, "acquire_timeout_sec": 30},
+        },
+        "service": {
+            "download_loop": {
+                "max_queries_per_cycle": 3,
+                "auto_seed_if_empty": True,
+                "auto_refill_done_queries": True,
+                "refill_batch_size": 1,
+                "query_recycle_cooldown_sec": 0,
+                "max_runs_per_query": 2,
+                "poll_interval_sec": 0.01,
+                "idle_sleep_sec": 0.01,
+                "max_cycles": 4,
+                "stop_when_idle": False,
+            }
+        },
+    }
+
+    workflow = Workflow(config, adapter=CyclingFakeBilibiliAdapter(), annotator=FakeAnnotator())
+    workflow.prepare_reference()
+    status = workflow.download_loop()
+
+    rows = workflow.db.fetchall("SELECT query_id, run_count, status FROM queries ORDER BY query_id")
+    run_counts = [int(row["run_count"]) for row in rows]
+
+    assert status["queries"]["total"] == 3
+    assert status["queries"]["done"] == 3
+    assert all(count >= 1 for count in run_counts)
+    assert max(run_counts) == 2
+    assert status["videos"]["downloaded"] >= 4

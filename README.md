@@ -43,6 +43,7 @@ pip install -e .
 - clip 标注并发：`annotation.clip_workers`
 - 全局 LLM 请求并发：`llm.parallel.max_inflight_requests`
 - 服务循环参数：`service.download_loop.*`、`service.pipeline_loop.*`
+- query 自动补种 / 回填参数：`service.download_loop.auto_seed_if_empty`、`auto_refill_done_queries`、`query_recycle_cooldown_sec`、`max_runs_per_query`
 
 可用 profile：
 
@@ -58,11 +59,16 @@ pip install -e .
 python scripts/run_pipeline.py prepare-reference
 ```
 
-然后把 query 写入 SQLite：
+如果你想手动初始化 query，可以执行：
 
 ```bash
 python scripts/run_pipeline.py seed-queries
 ```
+
+但在当前默认配置下，`download-loop` 启动时已经支持：
+
+- 当 `queries` 表为空时自动 `seed-queries`
+- 当 `pending/retry` 用完时，自动把满足冷却条件的 `done` query 回收成新的 `pending`
 
 ## 单阶段运行
 
@@ -115,6 +121,8 @@ python scripts/run_pipeline.py \
 - 下载是单独进程，适合长期运行
 - 每个视频会打印 `download_start / download_progress / download_finish`
 - 循环快照里会看到 `downloading / downloaded / pending_preprocess`
+- 当 `queries` 表为空时可自动补种
+- 当 `pending` 用完时可自动 recycle 已完成 query，不需要手动重新 `seed-queries`
 
 `pipeline-loop` 的特点：
 
@@ -132,6 +140,11 @@ python scripts/run_pipeline.py \
 - `crawl.download.workers`：下载并发
 - `crawl.download.max_inflight_per_host`：单 host 并发上限
 - `service.download_loop.max_queries_per_cycle`：每个 loop 最多消费多少 query
+- `service.download_loop.auto_seed_if_empty`：空库时自动 `seed-queries`
+- `service.download_loop.auto_refill_done_queries`：`pending/retry` 用完后是否自动回填已完成 query
+- `service.download_loop.refill_batch_size`：每次回填多少条 query
+- `service.download_loop.query_recycle_cooldown_sec`：query 重新进入队列前的冷却时间
+- `service.download_loop.max_runs_per_query`：每条 query 最多允许跑多少轮，`0` 表示无限制
 - `service.download_loop.poll_interval_sec`
 - `service.download_loop.idle_sleep_sec`
 

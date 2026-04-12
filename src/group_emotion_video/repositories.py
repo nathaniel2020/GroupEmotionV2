@@ -13,8 +13,8 @@ class QueryRepository:
     def upsert(self, record: dict[str, Any]) -> None:
         self.db.execute(
             """
-            INSERT INTO queries (query_id, seed_id, excel_row, scene_text, trigger_text, query_text, status, last_run_at, hit_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO queries (query_id, seed_id, excel_row, scene_text, trigger_text, query_text, status, last_run_at, hit_count, run_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(query_id) DO UPDATE SET
               seed_id=excluded.seed_id,
               excel_row=excluded.excel_row,
@@ -35,6 +35,7 @@ class QueryRepository:
                 record.get("status", "pending"),
                 record.get("last_run_at"),
                 int(record.get("hit_count", 0)),
+                int(record.get("run_count", 0)),
             ),
         )
 
@@ -52,9 +53,47 @@ class QueryRepository:
 
     def mark_done(self, query_id: str, hit_count: int) -> None:
         self.db.execute(
-            "UPDATE queries SET status='done', last_run_at=?, hit_count=? WHERE query_id=?",
+            "UPDATE queries SET status='done', last_run_at=?, hit_count=?, run_count=COALESCE(run_count, 0) + 1 WHERE query_id=?",
             (datetime.now().isoformat(timespec="seconds"), int(hit_count), query_id),
         )
+
+    def recycle_done(self, limit: int, *, cooldown_sec: float = 0.0, max_runs_per_query: int = 0) -> int:
+        cooldown_sec = max(float(cooldown_sec), 0.0)
+        max_runs_per_query = max(int(max_runs_per_query), 0)
+        rows = self.db.fetchall(
+            """
+            SELECT query_id, last_run_at, run_count
+            FROM queries
+            WHERE status='done'
+            ORDER BY COALESCE(run_count, 0), COALESCE(last_run_at, ''), excel_row, query_text
+            """
+        )
+        if not rows:
+            return 0
+        now = datetime.now()
+        recyclable: list[str] = []
+        for row in rows:
+            run_count = int(row["run_count"] or 0)
+            if max_runs_per_query > 0 and run_count >= max_runs_per_query:
+                continue
+            last_run_at = str(row["last_run_at"] or "").strip()
+            if last_run_at:
+                try:
+                    elapsed_sec = (now - datetime.fromisoformat(last_run_at)).total_seconds()
+                except ValueError:
+                    elapsed_sec = cooldown_sec
+                if elapsed_sec < cooldown_sec:
+                    continue
+            recyclable.append(str(row["query_id"]))
+            if len(recyclable) >= int(limit):
+                break
+        if not recyclable:
+            return 0
+        self.db.executemany(
+            "UPDATE queries SET status='pending' WHERE query_id=?",
+            [(query_id,) for query_id in recyclable],
+        )
+        return len(recyclable)
 
     def count(self) -> int:
         row = self.db.fetchone("SELECT COUNT(*) AS count FROM queries")

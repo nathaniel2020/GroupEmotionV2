@@ -50,6 +50,12 @@ Phase 8
 - [x] 补充完整常驻运行 profile 与 README
 - **Status:** complete
 
+### Phase 9: Query Auto Refill
+- [x] 为 query 增加 `run_count`，支持限制最大重跑轮次
+- [x] 让 `download-loop` 在空库时自动 seed，在 `pending` 用完时自动 recycle `done`
+- [x] 更新 README 与测试覆盖自动补种 / 自动回填
+- **Status:** complete
+
 ## Key Decisions
 | Decision | Rationale |
 |----------|-----------|
@@ -66,3 +72,4 @@ Phase 8
 - 清理或归档 smoke 运行中的失败工件历史
 - 让真实在线运行积累更多耗时样本，提升 5 天产能估算的稳定性
 - 在真实 VLLM 环境下验证 `annotation_trigger_size=100` 的批触发吞吐与延迟权衡
+- 根据真实数据分布调优 `query_recycle_cooldown_sec` 和 `max_runs_per_query`
