@@ -664,6 +664,95 @@ def test_import_01301_runtime_moves_bilibili_videos_into_pipeline_queue(tmp_path
     assert status["videos"]["downloaded"] == 1
 
 
+def test_import_01301_runtime_resume_continues_query_excel_rows_after_skips(tmp_path: Path, monkeypatch) -> None:
+    config = {
+        "project": {
+            "name": "test_project",
+            "root_dir": str(tmp_path),
+            "data_dir": "data",
+            "runtime_dir": "runtime",
+            "reference_dir": "data/reference",
+            "query_seed_catalog_path": "data/reference/query_seed_catalog.json",
+            "annotation_domains_path": "data/reference/annotation_domains.json",
+            "query_seed_excel_path": str(tmp_path / "missing.xlsx"),
+            "query_seed_sheet_name": "情感因素",
+            "annotation_schema_source_path": str(tmp_path / "schema.json"),
+            "group_emotion_label_seed_path": str(tmp_path / "labels.json"),
+        },
+        "sources": {
+            "default": "bilibili",
+            "bilibili": {"enabled": True, "max_pages_per_query": 1, "max_items_per_query": 3},
+        },
+        "crawl": {
+            "max_queries_per_run": 10,
+            "min_duration_sec": 15,
+            "max_duration_sec": 1200,
+            "max_video_size_mb": 300,
+            "enrich_workers": 1,
+            "max_items_per_query": 3,
+            "download": {"enabled": True, "workers": 1, "max_inflight_per_host": 1, "retries": 1, "fragment_retries": 1, "socket_timeout_sec": 10},
+        },
+        "preprocess": {
+            "workers": 1,
+            "subtitle_target_min_sec": 8,
+            "subtitle_target_max_sec": 15,
+            "min_clip_duration_sec": 4,
+            "max_clip_duration_sec": 20,
+            "clip_export_mode": "copy",
+            "keyframe_count": 2,
+            "use_llm_filter": False,
+            "duplicate_overlap_threshold": 0.8,
+        },
+        "annotation": {"max_clips_per_run": 10, "clip_workers": 2, "min_overall_confidence": 0.6, "export_requires_review_clear": False},
+        "llm": {
+            "enabled": False,
+            "base_url": "https://yunwu.ai/v1/",
+            "api_key_env": "YUNWU_API_KEY",
+            "model": "gemini-3.1-pro-preview",
+            "timeout_sec": 30,
+            "temperature": 0.1,
+            "max_images_per_prompt": 2,
+            "parallel": {"enabled": True, "max_inflight_requests": 2, "acquire_timeout_sec": 30},
+        },
+        "service": {},
+    }
+
+    legacy_runtime_root = tmp_path / "legacy_runtime"
+    source_root = legacy_runtime_root / "artifacts" / "raw_videos" / "bilibili"
+    first_video = source_root / "high_flat" / "BV1TEST12345.mp4"
+    second_video = source_root / "low_flat" / "BV1TEST67890.mp4"
+    first_video.parent.mkdir(parents=True, exist_ok=True)
+    first_video.write_bytes(b"fake-video-bytes-1")
+
+    monkeypatch.setattr(LegacyRuntimeImporter, "_probe_duration_sec", lambda self, path: 18.0)
+
+    workflow = Workflow(config, adapter=FakeBilibiliAdapter(), annotator=FakeAnnotator())
+    first_result = workflow.import_01301_runtime(legacy_runtime_root=legacy_runtime_root, progress=False)
+
+    first_video.parent.mkdir(parents=True, exist_ok=True)
+    first_video.write_bytes(b"fake-video-bytes-1")
+    second_video.parent.mkdir(parents=True, exist_ok=True)
+    second_video.write_bytes(b"fake-video-bytes-2")
+    second_result = workflow.import_01301_runtime(legacy_runtime_root=legacy_runtime_root, progress=False)
+
+    query_rows = workflow.db.fetchall("SELECT query_id, excel_row, query_text FROM queries ORDER BY excel_row")
+    video_rows = workflow.db.fetchall("SELECT bvid, query_id FROM videos ORDER BY bvid")
+
+    assert first_result["imported_videos"] == 1
+    assert second_result["imported_videos"] == 1
+    assert second_result["skipped_existing"] == 1
+    assert [row["excel_row"] for row in query_rows] == [950000, 950001]
+    assert [row["query_text"] for row in query_rows] == ["legacy_import::high_flat", "legacy_import::low_flat"]
+
+    first_seed_id = make_seed_id(950000, "高约束-扁平", "legacy_import::high_flat")
+    second_seed_id = make_seed_id(950001, "低约束-扁平", "legacy_import::low_flat")
+    assert [row["query_id"] for row in query_rows] == [
+        make_query_id(first_seed_id, "legacy_import::high_flat"),
+        make_query_id(second_seed_id, "legacy_import::low_flat"),
+    ]
+    assert [row["query_id"] for row in video_rows] == [query_rows[0]["query_id"], query_rows[1]["query_id"]]
+
+
 def test_download_loop_auto_prepares_reference_when_missing(tmp_path: Path) -> None:
     excel_path = tmp_path / "原子情感因素.xlsx"
     schema_path = tmp_path / "schema.json"

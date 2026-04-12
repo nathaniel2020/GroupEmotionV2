@@ -247,6 +247,11 @@ class LegacyRuntimeImporter:
         if cached_by_text is not None:
             self._query_cache[key] = cached_by_text
             return cached_by_text
+        existing = self.query_repo.get_by_query_text(query_text)
+        if existing is not None:
+            self._query_cache[key] = existing
+            self._query_cache_by_text[query_text] = existing
+            return existing
         excel_row = self._next_excel_row
         self._next_excel_row += 1
         seed_id = make_seed_id(excel_row, scene_text, trigger_text)
@@ -292,6 +297,7 @@ class LegacyRuntimeImporter:
         source_root = Path(raw_root).resolve() if raw_root else (runtime_root / "artifacts" / "raw_videos" / "bilibili")
         if not source_root.exists():
             raise FileNotFoundError(f"Legacy raw video root does not exist: {source_root}")
+        self._next_excel_row = self.query_repo.next_excel_row(minimum=950000)
 
         metadata_index = LegacyMetadataIndex(runtime_root)
         files = self._candidate_files(source_root, limit)

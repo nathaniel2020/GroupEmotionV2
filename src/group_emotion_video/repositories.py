@@ -50,6 +50,15 @@ class QueryRepository:
             ),
         )
 
+    def get_by_query_text(self, query_text: str) -> dict[str, Any] | None:
+        row = self.db.fetchone("SELECT * FROM queries WHERE query_text=?", (query_text,))
+        return dict(row) if row else None
+
+    def next_excel_row(self, *, minimum: int = 1) -> int:
+        row = self.db.fetchone("SELECT MAX(excel_row) AS max_excel_row FROM queries")
+        max_excel_row = int(row["max_excel_row"]) if row and row["max_excel_row"] is not None else minimum - 1
+        return max(max_excel_row + 1, int(minimum))
+
     def list_pending(self, limit: int | None) -> list[dict[str, Any]]:
         rows = self.db.fetchall(
             """
