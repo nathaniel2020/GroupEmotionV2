@@ -6,6 +6,9 @@ from pathlib import Path
 from openpyxl import Workbook
 
 from group_emotion_video.cli import main as cli_main
+from group_emotion_video.ids import make_query_id, make_seed_id
+from group_emotion_video.legacy_runtime_import import LegacyRuntimeImporter
+from group_emotion_video.local_registry import LocalVideoRegistry
 from group_emotion_video.types import CandidateVideo, DownloadResult
 from group_emotion_video.workflow import Workflow
 
@@ -474,6 +477,193 @@ def test_service_loops_process_download_and_pipeline(tmp_path: Path) -> None:
     assert pipeline_status["annotations"]["done"] == 1
 
 
+def test_register_local_videos_can_feed_preprocess(tmp_path: Path, monkeypatch) -> None:
+    excel_path = tmp_path / "原子情感因素.xlsx"
+    schema_path = tmp_path / "schema.json"
+    label_seed_path = tmp_path / "labels.json"
+    _write_seed_excel(excel_path)
+    _write_schema_json(schema_path)
+    label_seed_path.write_text(json.dumps({"labels": ["Joy", "Anxiety"]}, ensure_ascii=False), encoding="utf-8")
+
+    config = {
+        "project": {
+            "name": "test_project",
+            "root_dir": str(tmp_path),
+            "data_dir": "data",
+            "runtime_dir": "runtime",
+            "reference_dir": "data/reference",
+            "query_seed_catalog_path": "data/reference/query_seed_catalog.json",
+            "annotation_domains_path": "data/reference/annotation_domains.json",
+            "query_seed_excel_path": str(excel_path),
+            "query_seed_sheet_name": "情感因素",
+            "annotation_schema_source_path": str(schema_path),
+            "group_emotion_label_seed_path": str(label_seed_path),
+        },
+        "sources": {
+            "default": "bilibili",
+            "bilibili": {"enabled": True, "max_pages_per_query": 1, "max_items_per_query": 3},
+        },
+        "crawl": {
+            "max_queries_per_run": 10,
+            "min_duration_sec": 15,
+            "max_duration_sec": 1200,
+            "max_video_size_mb": 300,
+            "enrich_workers": 1,
+            "max_items_per_query": 3,
+            "download": {"enabled": True, "workers": 1, "max_inflight_per_host": 1, "retries": 1, "fragment_retries": 1, "socket_timeout_sec": 10},
+        },
+        "preprocessing": {
+            "max_videos_per_run": 5,
+            "workers": 1,
+            "prefer_subtitles": True,
+            "fixed_window_sec": 12,
+            "overlap_sec": 2,
+            "subtitle_target_min_sec": 8,
+            "subtitle_target_max_sec": 15,
+            "min_clip_duration_sec": 4,
+            "max_clip_duration_sec": 20,
+            "clip_export_mode": "copy",
+            "keyframe_count": 2,
+            "use_llm_filter": False,
+            "duplicate_overlap_threshold": 0.8,
+        },
+        "annotation": {"max_clips_per_run": 10, "clip_workers": 2, "min_overall_confidence": 0.6, "export_requires_review_clear": False},
+        "llm": {
+            "enabled": False,
+            "base_url": "https://yunwu.ai/v1/",
+            "api_key_env": "YUNWU_API_KEY",
+            "model": "gemini-3.1-pro-preview",
+            "timeout_sec": 30,
+            "temperature": 0.1,
+            "max_images_per_prompt": 2,
+            "parallel": {"enabled": True, "max_inflight_requests": 2, "acquire_timeout_sec": 30},
+        },
+        "service": {
+            "download_loop": {"max_queries_per_cycle": 10, "poll_interval_sec": 0.01, "idle_sleep_sec": 0.01, "max_cycles": 0, "stop_when_idle": True},
+            "pipeline_loop": {
+                "preprocess_claim_limit": 1,
+                "annotation_trigger_size": 1,
+                "annotation_batch_size": 1,
+                "annotation_trigger_timeout_sec": 0,
+                "queue_max_clips": 8,
+                "poll_interval_sec": 0.01,
+                "idle_sleep_sec": 0.01,
+                "max_cycles": 0,
+                "stop_when_idle": True,
+            },
+        },
+    }
+
+    local_root = tmp_path / "legacy_batch"
+    source_video = local_root / "封闭室内中空间（教室/会议室）" / "sample.mp4"
+    source_video.parent.mkdir(parents=True, exist_ok=True)
+    source_video.write_bytes(b"fake-video-bytes")
+
+    monkeypatch.setattr(LocalVideoRegistry, "_probe_duration_sec", lambda self, path: 18.0)
+
+    workflow = Workflow(config, adapter=FakeBilibiliAdapter(), annotator=FakeAnnotator())
+    workflow.prepare_reference()
+    import_result = workflow.register_local_videos(input_root=local_root, tags=["群体", "emotion"])
+    accepted = workflow.preprocess()
+    status = workflow.status()
+
+    assert import_result["registered_videos"] == 1
+    assert accepted >= 1
+    assert status["videos"]["downloaded"] == 1
+    assert status["videos"]["processed"] == 1
+    assert status["clips"]["accepted"] >= 1
+    assert status["clips"]["pending_annotation"] >= 1
+
+
+def test_import_01301_runtime_moves_bilibili_videos_into_pipeline_queue(tmp_path: Path, monkeypatch) -> None:
+    excel_path = tmp_path / "原子情感因素.xlsx"
+    schema_path = tmp_path / "schema.json"
+    label_seed_path = tmp_path / "labels.json"
+    _write_seed_excel(excel_path)
+    _write_schema_json(schema_path)
+    label_seed_path.write_text(json.dumps({"labels": ["Joy", "Anxiety"]}, ensure_ascii=False), encoding="utf-8")
+
+    config = {
+        "project": {
+            "name": "test_project",
+            "root_dir": str(tmp_path),
+            "data_dir": "data",
+            "runtime_dir": "runtime",
+            "reference_dir": "data/reference",
+            "query_seed_catalog_path": "data/reference/query_seed_catalog.json",
+            "annotation_domains_path": "data/reference/annotation_domains.json",
+            "query_seed_excel_path": str(excel_path),
+            "query_seed_sheet_name": "情感因素",
+            "annotation_schema_source_path": str(schema_path),
+            "group_emotion_label_seed_path": str(label_seed_path),
+        },
+        "sources": {
+            "default": "bilibili",
+            "bilibili": {"enabled": True, "max_pages_per_query": 1, "max_items_per_query": 3},
+        },
+        "crawl": {
+            "max_queries_per_run": 10,
+            "min_duration_sec": 15,
+            "max_duration_sec": 1200,
+            "max_video_size_mb": 300,
+            "enrich_workers": 1,
+            "max_items_per_query": 3,
+            "download": {"enabled": True, "workers": 1, "max_inflight_per_host": 1, "retries": 1, "fragment_retries": 1, "socket_timeout_sec": 10},
+        },
+        "preprocessing": {
+            "max_videos_per_run": 5,
+            "workers": 1,
+            "prefer_subtitles": True,
+            "fixed_window_sec": 12,
+            "overlap_sec": 2,
+            "subtitle_target_min_sec": 8,
+            "subtitle_target_max_sec": 15,
+            "min_clip_duration_sec": 4,
+            "max_clip_duration_sec": 20,
+            "clip_export_mode": "copy",
+            "keyframe_count": 2,
+            "use_llm_filter": False,
+            "duplicate_overlap_threshold": 0.8,
+        },
+        "annotation": {"max_clips_per_run": 10, "clip_workers": 2, "min_overall_confidence": 0.6, "export_requires_review_clear": False},
+        "llm": {
+            "enabled": False,
+            "base_url": "https://yunwu.ai/v1/",
+            "api_key_env": "YUNWU_API_KEY",
+            "model": "gemini-3.1-pro-preview",
+            "timeout_sec": 30,
+            "temperature": 0.1,
+            "max_images_per_prompt": 2,
+            "parallel": {"enabled": True, "max_inflight_requests": 2, "acquire_timeout_sec": 30},
+        },
+        "service": {},
+    }
+
+    legacy_runtime_root = tmp_path / "legacy_runtime"
+    source_video = legacy_runtime_root / "artifacts" / "raw_videos" / "bilibili" / "high_flat" / "BV1TEST12345.mp4"
+    source_video.parent.mkdir(parents=True, exist_ok=True)
+    source_video.write_bytes(b"fake-video-bytes")
+
+    monkeypatch.setattr(LegacyRuntimeImporter, "_probe_duration_sec", lambda self, path: 18.0)
+
+    workflow = Workflow(config, adapter=FakeBilibiliAdapter(), annotator=FakeAnnotator())
+    result = workflow.import_01301_runtime(legacy_runtime_root=legacy_runtime_root, progress=False)
+    status = workflow.status()
+    rows = workflow.db.fetchall("SELECT bvid, platform, query_id, raw_video_path, download_status FROM videos")
+
+    assert result["imported_videos"] == 1
+    assert result["moved_files"] == 1
+    assert not source_video.exists()
+    assert len(rows) == 1
+    assert rows[0]["bvid"] == "BV1TEST12345"
+    assert rows[0]["platform"] == "bilibili"
+    assert rows[0]["download_status"] == "downloaded"
+    expected_seed_id = make_seed_id(950000, "高约束-扁平", "legacy_import::high_flat")
+    assert rows[0]["query_id"] == make_query_id(expected_seed_id, "legacy_import::high_flat")
+    assert Path(str(rows[0]["raw_video_path"])).exists()
+    assert status["videos"]["downloaded"] == 1
+
+
 def test_download_loop_auto_prepares_reference_when_missing(tmp_path: Path) -> None:
     excel_path = tmp_path / "原子情感因素.xlsx"
     schema_path = tmp_path / "schema.json"
@@ -646,6 +836,214 @@ def test_download_loop_auto_seeds_and_recycles_queries(tmp_path: Path) -> None:
     assert all(count >= 1 for count in run_counts)
     assert max(run_counts) == 2
     assert status["videos"]["downloaded"] >= 4
+
+
+def test_query_shard_only_seeds_owned_queries(tmp_path: Path) -> None:
+    reference_dir = tmp_path / "data" / "reference"
+    reference_dir.mkdir(parents=True, exist_ok=True)
+    catalog_path = reference_dir / "query_seed_catalog.json"
+    domains_path = reference_dir / "annotation_domains.json"
+    catalog = {
+        "rows": [
+            {
+                "seed_id": "seed_alpha",
+                "excel_row": 1,
+                "scene_text": "教室",
+                "trigger_text": "表扬",
+                "query_texts": ["教室 表扬", "教室 鼓掌"],
+            },
+            {
+                "seed_id": "seed_beta",
+                "excel_row": 2,
+                "scene_text": "操场",
+                "trigger_text": "冲突",
+                "query_texts": ["操场 冲突", "操场 争执"],
+            },
+        ]
+    }
+    catalog_path.write_text(json.dumps(catalog, ensure_ascii=False, indent=2), encoding="utf-8")
+    domains_path.write_text(json.dumps({"domains": []}, ensure_ascii=False), encoding="utf-8")
+
+    config = {
+        "project": {
+            "name": "test_project",
+            "root_dir": str(tmp_path),
+            "data_dir": "data",
+            "runtime_dir": "runtime_shard0",
+            "reference_dir": "data/reference",
+            "query_seed_catalog_path": "data/reference/query_seed_catalog.json",
+            "annotation_domains_path": "data/reference/annotation_domains.json",
+            "query_seed_excel_path": str(catalog_path),
+            "query_seed_sheet_name": "情感因素",
+            "annotation_schema_source_path": str(domains_path),
+            "group_emotion_label_seed_path": str(domains_path),
+        },
+        "sources": {
+            "default": "bilibili",
+            "bilibili": {"enabled": True, "max_pages_per_query": 1, "max_items_per_query": 3},
+        },
+        "crawl": {
+            "max_queries_per_run": 10,
+            "min_duration_sec": 15,
+            "max_duration_sec": 1200,
+            "max_video_size_mb": 300,
+            "enrich_workers": 1,
+            "max_items_per_query": 3,
+            "query_shard": {"count": 2, "index": 0},
+            "download": {"enabled": False, "workers": 1, "max_inflight_per_host": 1, "retries": 1, "fragment_retries": 1, "socket_timeout_sec": 10},
+        },
+        "preprocessing": {
+            "max_videos_per_run": 5,
+            "workers": 1,
+            "prefer_subtitles": True,
+            "fixed_window_sec": 12,
+            "overlap_sec": 2,
+            "subtitle_target_min_sec": 8,
+            "subtitle_target_max_sec": 15,
+            "min_clip_duration_sec": 4,
+            "max_clip_duration_sec": 20,
+            "clip_export_mode": "copy",
+            "keyframe_count": 2,
+            "use_llm_filter": False,
+            "duplicate_overlap_threshold": 0.8,
+        },
+        "annotation": {"max_clips_per_run": 10, "clip_workers": 2, "min_overall_confidence": 0.6, "export_requires_review_clear": False},
+        "llm": {
+            "enabled": False,
+            "base_url": "https://yunwu.ai/v1/",
+            "api_key_env": "YUNWU_API_KEY",
+            "model": "gemini-3.1-pro-preview",
+            "timeout_sec": 30,
+            "temperature": 0.1,
+            "max_images_per_prompt": 2,
+            "parallel": {"enabled": True, "max_inflight_requests": 2, "acquire_timeout_sec": 30},
+        },
+        "service": {"download_loop": {"max_queries_per_cycle": 10}},
+    }
+
+    all_query_ids = {
+        make_query_id("seed_alpha", "教室 表扬"),
+        make_query_id("seed_alpha", "教室 鼓掌"),
+        make_query_id("seed_beta", "操场 冲突"),
+        make_query_id("seed_beta", "操场 争执"),
+    }
+    workflow0 = Workflow(config)
+    seeded0 = workflow0.seed_queries()
+    shard0_query_ids = {str(row["query_id"]) for row in workflow0.query_repo.list_pending(limit=0)}
+
+    config_shard1 = json.loads(json.dumps(config))
+    config_shard1["project"]["runtime_dir"] = "runtime_shard1"
+    config_shard1["crawl"]["query_shard"]["index"] = 1
+    workflow1 = Workflow(config_shard1)
+    seeded1 = workflow1.seed_queries()
+    shard1_query_ids = {str(row["query_id"]) for row in workflow1.query_repo.list_pending(limit=0)}
+
+    assert seeded0 == len(shard0_query_ids)
+    assert seeded1 == len(shard1_query_ids)
+    assert shard0_query_ids.isdisjoint(shard1_query_ids)
+    assert shard0_query_ids | shard1_query_ids == all_query_ids
+    assert all(workflow0.query_repo.owns_query_id(query_id) for query_id in shard0_query_ids)
+    assert all(workflow1.query_repo.owns_query_id(query_id) for query_id in shard1_query_ids)
+
+
+def test_video_shard_prevents_same_bvid_from_downloading_on_both_machines(tmp_path: Path) -> None:
+    reference_dir = tmp_path / "data" / "reference"
+    reference_dir.mkdir(parents=True, exist_ok=True)
+    catalog_path = reference_dir / "query_seed_catalog.json"
+    domains_path = reference_dir / "annotation_domains.json"
+    catalog_path.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "seed_id": "seed_alpha",
+                        "excel_row": 1,
+                        "scene_text": "教室",
+                        "trigger_text": "表扬",
+                        "query_texts": ["教室 表扬"],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    domains_path.write_text(json.dumps({"domains": []}, ensure_ascii=False), encoding="utf-8")
+
+    config = {
+        "project": {
+            "name": "test_project",
+            "root_dir": str(tmp_path),
+            "data_dir": "data",
+            "runtime_dir": "runtime_video_shard0",
+            "reference_dir": "data/reference",
+            "query_seed_catalog_path": "data/reference/query_seed_catalog.json",
+            "annotation_domains_path": "data/reference/annotation_domains.json",
+            "query_seed_excel_path": str(catalog_path),
+            "query_seed_sheet_name": "情感因素",
+            "annotation_schema_source_path": str(domains_path),
+            "group_emotion_label_seed_path": str(domains_path),
+        },
+        "sources": {
+            "default": "bilibili",
+            "bilibili": {"enabled": True, "max_pages_per_query": 1, "max_items_per_query": 3},
+        },
+        "crawl": {
+            "max_queries_per_run": 10,
+            "min_duration_sec": 15,
+            "max_duration_sec": 1200,
+            "max_video_size_mb": 300,
+            "enrich_workers": 1,
+            "max_items_per_query": 3,
+            "query_shard": {"count": 1, "index": 0},
+            "video_shard": {"count": 2, "index": 0},
+            "download": {"enabled": True, "workers": 1, "max_inflight_per_host": 1, "retries": 1, "fragment_retries": 1, "socket_timeout_sec": 10},
+        },
+        "preprocessing": {
+            "max_videos_per_run": 5,
+            "workers": 1,
+            "prefer_subtitles": True,
+            "fixed_window_sec": 12,
+            "overlap_sec": 2,
+            "subtitle_target_min_sec": 8,
+            "subtitle_target_max_sec": 15,
+            "min_clip_duration_sec": 4,
+            "max_clip_duration_sec": 20,
+            "clip_export_mode": "copy",
+            "keyframe_count": 2,
+            "use_llm_filter": False,
+            "duplicate_overlap_threshold": 0.8,
+        },
+        "annotation": {"max_clips_per_run": 10, "clip_workers": 2, "min_overall_confidence": 0.6, "export_requires_review_clear": False},
+        "llm": {
+            "enabled": False,
+            "base_url": "https://yunwu.ai/v1/",
+            "api_key_env": "YUNWU_API_KEY",
+            "model": "gemini-3.1-pro-preview",
+            "timeout_sec": 30,
+            "temperature": 0.1,
+            "max_images_per_prompt": 2,
+            "parallel": {"enabled": True, "max_inflight_requests": 2, "acquire_timeout_sec": 30},
+        },
+        "service": {"download_loop": {"max_queries_per_cycle": 10}},
+    }
+
+    workflow0 = Workflow(config, adapter=FakeBilibiliAdapter())
+    workflow0.seed_queries()
+    workflow0.crawl()
+    shard0_bvids = {str(row["bvid"]) for row in workflow0.db.fetchall("SELECT bvid FROM videos")}
+
+    config_shard1 = json.loads(json.dumps(config))
+    config_shard1["project"]["runtime_dir"] = "runtime_video_shard1"
+    config_shard1["crawl"]["video_shard"]["index"] = 1
+    workflow1 = Workflow(config_shard1, adapter=FakeBilibiliAdapter())
+    workflow1.seed_queries()
+    workflow1.crawl()
+    shard1_bvids = {str(row["bvid"]) for row in workflow1.db.fetchall("SELECT bvid FROM videos")}
+
+    assert shard0_bvids.isdisjoint(shard1_bvids)
+    assert shard0_bvids | shard1_bvids == {"BV_TEST_001"}
 
 
 def test_zero_limits_mean_unbounded_loop_behavior(tmp_path: Path) -> None:

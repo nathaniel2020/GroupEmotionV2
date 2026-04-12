@@ -12,7 +12,9 @@ from .acquisition import AcquisitionService
 from .annotation import AnnotationService, SingleModelAnnotator
 from .config import load_config
 from .exporter import ExportService
+from .legacy_runtime_import import LegacyRuntimeImporter
 from .llm import OpenAICompatibleLLM
+from .local_registry import LocalVideoRegistry
 from .logging_utils import setup_logging
 from .preprocessing import PreprocessingService
 from .reference import prepare_reference_files
@@ -35,7 +37,12 @@ class Workflow:
         self.logger, self.log_path = setup_logging(self.layout["logs"])
         self.db = SQLiteDB(self.layout["db"])
         initialize_schema(self.db)
-        self.query_repo = QueryRepository(self.db)
+        shard_cfg = config.get("crawl", {}).get("query_shard") or {}
+        self.query_repo = QueryRepository(
+            self.db,
+            shard_count=int(shard_cfg.get("count", 1)),
+            shard_index=int(shard_cfg.get("index", 0)),
+        )
         self.video_repo = VideoRepository(self.db)
         self.clip_repo = ClipRepository(self.db)
         self.annotation_repo = AnnotationRepository(self.db)
@@ -110,6 +117,65 @@ class Workflow:
     def seed_queries(self) -> int:
         query_seed_catalog_path, _ = self._require_reference()
         return self.acquisition.seed_queries(query_seed_catalog_path)
+
+    def register_local_videos(
+        self,
+        *,
+        input_root: str | Path,
+        scene_text: str | None = None,
+        trigger_text: str | None = None,
+        query_text: str | None = None,
+        tags: list[str] | None = None,
+        transfer_mode: str = "copy",
+        replace_existing: bool = False,
+        default_duration_sec: float | None = None,
+        ) -> dict[str, Any]:
+        try:
+            query_seed_catalog_path, _ = self._ensure_reference_available(auto_prepare=True)
+        except Exception:
+            query_seed_catalog_path = None
+        service = LocalVideoRegistry(
+            self.config,
+            query_repo=self.query_repo,
+            video_repo=self.video_repo,
+            layout=self.layout,
+            logger=self.logger,
+        )
+        return service.register(
+            input_root,
+            catalog_path=query_seed_catalog_path,
+            scene_text=scene_text,
+            trigger_text=trigger_text,
+            query_text=query_text,
+            tags=tags,
+            transfer_mode=transfer_mode,
+            replace_existing=replace_existing,
+            default_duration_sec=default_duration_sec,
+        )
+
+    def import_01301_runtime(
+        self,
+        *,
+        legacy_runtime_root: str | Path,
+        raw_root: str | Path | None = None,
+        limit: int | None = None,
+        replace_existing: bool = False,
+        progress: bool = True,
+    ) -> dict[str, Any]:
+        importer = LegacyRuntimeImporter(
+            self.config,
+            query_repo=self.query_repo,
+            video_repo=self.video_repo,
+            layout=self.layout,
+            logger=self.logger,
+        )
+        return importer.import_runtime(
+            legacy_runtime_root,
+            raw_root=raw_root,
+            limit=limit,
+            replace_existing=replace_existing,
+            progress=progress,
+        )
 
     def crawl(self) -> int:
         self._require_reference()

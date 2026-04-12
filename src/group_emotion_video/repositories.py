@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 from typing import Any
 
@@ -7,8 +8,18 @@ from .sqlite_db import SQLiteDB
 
 
 class QueryRepository:
-    def __init__(self, db: SQLiteDB):
+    def __init__(self, db: SQLiteDB, *, shard_count: int = 1, shard_index: int = 0):
         self.db = db
+        self.shard_count = max(int(shard_count), 1)
+        self.shard_index = int(shard_index)
+        if self.shard_index < 0 or self.shard_index >= self.shard_count:
+            raise ValueError(f"Invalid query shard index={self.shard_index} for shard_count={self.shard_count}")
+
+    def owns_query_id(self, query_id: str) -> bool:
+        if self.shard_count <= 1:
+            return True
+        digest = hashlib.sha1(str(query_id).encode("utf-8")).hexdigest()
+        return int(digest, 16) % self.shard_count == self.shard_index
 
     def upsert(self, record: dict[str, Any]) -> None:
         self.db.execute(
@@ -40,25 +51,17 @@ class QueryRepository:
         )
 
     def list_pending(self, limit: int | None) -> list[dict[str, Any]]:
+        rows = self.db.fetchall(
+            """
+            SELECT * FROM queries
+            WHERE status IN ('pending', 'retry')
+            ORDER BY COALESCE(last_run_at, ''), excel_row, query_text
+            """
+        )
+        pending = [dict(row) for row in rows if self.owns_query_id(str(row["query_id"]))]
         if limit is None or int(limit) <= 0:
-            rows = self.db.fetchall(
-                """
-                SELECT * FROM queries
-                WHERE status IN ('pending', 'retry')
-                ORDER BY COALESCE(last_run_at, ''), excel_row, query_text
-                """
-            )
-        else:
-            rows = self.db.fetchall(
-                """
-                SELECT * FROM queries
-                WHERE status IN ('pending', 'retry')
-                ORDER BY COALESCE(last_run_at, ''), excel_row, query_text
-                LIMIT ?
-                """,
-                (int(limit),),
-            )
-        return [dict(row) for row in rows]
+            return pending
+        return pending[: int(limit)]
 
     def mark_done(self, query_id: str, hit_count: int) -> None:
         self.db.execute(
@@ -82,6 +85,9 @@ class QueryRepository:
         now = datetime.now()
         recyclable: list[str] = []
         for row in rows:
+            query_id = str(row["query_id"])
+            if not self.owns_query_id(query_id):
+                continue
             run_count = int(row["run_count"] or 0)
             if max_runs_per_query > 0 and run_count >= max_runs_per_query:
                 continue
@@ -93,7 +99,7 @@ class QueryRepository:
                     elapsed_sec = cooldown_sec
                 if elapsed_sec < cooldown_sec:
                     continue
-            recyclable.append(str(row["query_id"]))
+            recyclable.append(query_id)
             if limit is not None and int(limit) > 0 and len(recyclable) >= int(limit):
                 break
         if not recyclable:

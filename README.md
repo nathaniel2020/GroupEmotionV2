@@ -82,6 +82,119 @@ python scripts/run_pipeline.py seed-queries
 - 当 `queries` 表为空时自动 `seed-queries`
 - 当 `pending/retry` 用完时，自动把满足冷却条件的 `done` query 回收成新的 `pending`
 
+## 本地视频入库
+
+如果你已经有一批本地视频，不想再走 `crawl/download`，可以直接把视频注册进 `runtime/.../index.sqlite`，后续就能直接调用 `preprocess` / `pipeline-loop`。
+
+如果来源是 `013.01` 的完整 runtime，优先使用下面这个专用命令，而不是通用的 `register-local-videos`。
+
+### 导入 `013.01` runtime
+
+专用导入命令：
+
+```bash
+python scripts/run_pipeline.py \
+  --config configs/profiles/continuous_vllm_pipeline.yaml \
+  import-01301-runtime \
+  --legacy-runtime-root /mnt/data_disk/home/liuhaoyu/GroupEmotion/runtime
+```
+
+默认行为：
+
+- 从 `/mnt/.../runtime/artifacts/raw_videos/bilibili` 扫描原始视频
+- 显示终端进度条
+- 按 `move` 语义把视频转移到当前 `013.02` runtime 的 `tmp/videos/...`
+- 优先尝试读取 `013.01/runtime/db/keyword_index.db` 和 `video_meta.db`
+- 恢复 `bilibili` / `BVID` / `url` / `title` / `query` 关联等元信息
+- 在当前 `runtime/.../index.sqlite` 中写成与 `013.02` 自己下载产物同一套状态机：`download_status='downloaded'`
+
+常用参数：
+
+- `--raw-root`：如果原始视频不在默认位置，手动指定扫描根目录
+- `--limit N`：先做小批量试跑
+- `--replace-existing`：覆盖已导入记录
+- `--no-progress`：关闭进度条
+
+导入后直接处理：
+
+```bash
+python scripts/run_pipeline.py \
+  --config configs/profiles/continuous_vllm_pipeline.yaml \
+  pipeline-loop
+```
+
+说明：
+
+- 这里不需要 `--tag 群体 --tag emotion`。
+- 那两个 `--tag` 只是给通用本地导入器补文本提示，帮助无字幕视频通过预处理的弱规则过滤，不属于规范导入流程。
+- 如果源目录和当前 runtime 不在同一个文件系统，底层无法做原子 `rename`；`move` 语义会退化成“复制成功后删除源文件”，这是操作系统限制，不是导入器绕过了 `move`。
+
+推荐先准备 reference，这样命令会优先用 `query_seed_catalog.json` 去匹配场景目录名：
+
+```bash
+python scripts/run_pipeline.py prepare-reference
+```
+
+如果你的目录组织类似 `013.01` 风格，例如：
+
+```text
+/path/to/local_batch/
+  教室/
+    xxx.mp4
+    yyy.mp4
+  演唱会现场/
+    zzz.mp4
+```
+
+可以直接执行：
+
+```bash
+python scripts/run_pipeline.py register-local-videos \
+  --config configs/profiles/continuous_vllm_pipeline.yaml \
+  --input-root /path/to/local_batch
+```
+
+这个命令会：
+
+- 递归扫描视频文件
+- 尝试用一级子目录名匹配 reference 里的 `scene_text`
+- 把原视频复制到当前 runtime 的 `tmp/videos/local_import/...`
+- 在 `runtime/.../index.sqlite` 的 `queries` / `videos` 表里补齐记录
+- 把这些视频标记为 `downloaded`，供 `preprocess` 或 `pipeline-loop` 继续消费
+
+如果你的文件都在一个平铺目录下，没有场景子目录，可以手动指定：
+
+```bash
+python scripts/run_pipeline.py register-local-videos \
+  --input-root /path/to/flat_videos \
+  --scene-text "教室" \
+  --trigger-text "公开正面能力认可" \
+  --tag 群体 \
+  --tag emotion
+```
+
+可选参数：
+
+- `--transfer-mode copy|hardlink|symlink|move`：默认 `copy`。建议保留默认值，避免后续预处理删除原始库里的文件。
+- `--replace-existing`：如果同一批本地视频之前已经注册过，用它覆盖旧记录并重新 staging。
+- `--default-duration-sec`：`ffprobe` 拿不到时用这个兜底。
+- `--tag ...`：会写入视频 tags。对没有字幕、文件名也缺少语义信息的本地视频，建议显式加上如 `群体`、`emotion` 这类提示词，避免预处理阶段被弱信号过滤。
+
+入库后可以直接跑：
+
+```bash
+python scripts/run_pipeline.py --config configs/profiles/continuous_vllm_pipeline.yaml preprocess
+python scripts/run_pipeline.py --config configs/profiles/continuous_vllm_pipeline.yaml annotate
+```
+
+或者直接让常驻流水线接管：
+
+```bash
+python scripts/run_pipeline.py \
+  --config configs/profiles/continuous_vllm_pipeline.yaml \
+  pipeline-loop
+```
+
 ## 单阶段运行
 
 按阶段手动执行：
@@ -137,6 +250,32 @@ python scripts/run_pipeline.py \
 - 当 `queries` 表为空时可自动补种
 - 当 `pending` 用完时可自动 recycle 已完成 query，不需要手动重新 `seed-queries`
 - `max_queries_per_cycle: 0` 表示每轮尽可能多抓，不人为限制 query 批次
+
+如果两台机器不能通信，但你希望它们尽量不要抓到同一批视频，不要靠随机顺序，应该直接做静态分片：
+
+```yaml
+crawl:
+  query_shard:
+    count: 2
+    index: 0
+  video_shard:
+    count: 2
+    index: 0
+```
+
+两台机器分别配置：
+
+- 机器 A：`count: 2, index: 0`
+- 机器 B：`count: 2, index: 1`
+
+建议两层都开：
+
+- `query_shard`：把 query 队列拆开，避免两台机器重复跑同一批 query
+- `video_shard`：按 `bvid` 再做一次确定性过滤，避免同一个视频因为命中不同 query 而在两台机器都被下载
+
+这样两边都会基于同一份 `query_seed_catalog.json` 自动补种，但每台机器只会导入和消费自己那一片 `query_id`，并且只会下载自己负责的那一片视频，不需要互相通信。
+
+如果是 3 台机器，就设 `count: 3`，然后三台机器的 `index` 分别为 `0`、`1`、`2`。
 
 `pipeline-loop` 的特点：
 

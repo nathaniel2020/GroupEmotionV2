@@ -19,6 +19,28 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_reference_parser.add_argument("--query-seed-catalog-path", dest="query_seed_catalog_path")
     prepare_reference_parser.add_argument("--annotation-domains-path", dest="annotation_domains_path")
 
+    register_local_parser = subparsers.add_parser("register-local-videos")
+    register_local_parser.add_argument("--input-root", required=True, dest="input_root")
+    register_local_parser.add_argument("--scene-text", dest="scene_text")
+    register_local_parser.add_argument("--trigger-text", dest="trigger_text")
+    register_local_parser.add_argument("--query-text", dest="query_text")
+    register_local_parser.add_argument("--tag", action="append", dest="tags", default=[])
+    register_local_parser.add_argument(
+        "--transfer-mode",
+        choices=("copy", "hardlink", "symlink", "move"),
+        default="copy",
+        dest="transfer_mode",
+    )
+    register_local_parser.add_argument("--replace-existing", action="store_true", dest="replace_existing")
+    register_local_parser.add_argument("--default-duration-sec", type=float, dest="default_duration_sec")
+
+    import_legacy_parser = subparsers.add_parser("import-01301-runtime")
+    import_legacy_parser.add_argument("--legacy-runtime-root", required=True, dest="legacy_runtime_root")
+    import_legacy_parser.add_argument("--raw-root", dest="raw_root")
+    import_legacy_parser.add_argument("--limit", type=int, dest="limit")
+    import_legacy_parser.add_argument("--replace-existing", action="store_true", dest="replace_existing")
+    import_legacy_parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True, dest="progress")
+
     for name in ("seed-queries", "crawl", "preprocess", "annotate", "download-loop", "pipeline-loop", "export", "status"):
         subparsers.add_parser(name)
 
@@ -40,6 +62,25 @@ def main(argv: list[str] | None = None) -> int:
             label_seed_path=args.label_seed_path,
             query_seed_catalog_path=args.query_seed_catalog_path,
             annotation_domains_path=args.annotation_domains_path,
+        )
+    elif args.command == "register-local-videos":
+        result = workflow.register_local_videos(
+            input_root=args.input_root,
+            scene_text=args.scene_text,
+            trigger_text=args.trigger_text,
+            query_text=args.query_text,
+            tags=args.tags,
+            transfer_mode=args.transfer_mode,
+            replace_existing=args.replace_existing,
+            default_duration_sec=args.default_duration_sec,
+        )
+    elif args.command == "import-01301-runtime":
+        result = workflow.import_01301_runtime(
+            legacy_runtime_root=args.legacy_runtime_root,
+            raw_root=args.raw_root,
+            limit=args.limit,
+            replace_existing=args.replace_existing,
+            progress=args.progress,
         )
     elif args.command == "seed-queries":
         result = workflow.seed_queries()

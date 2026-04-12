@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import re
@@ -314,6 +315,11 @@ class AcquisitionService:
         self.layout = layout
         self.logger = logger
         self.adapter = adapter or BilibiliAdapter(config, logger=logger)
+        video_shard_cfg = config.get("crawl", {}).get("video_shard") or {}
+        self.video_shard_count = max(int(video_shard_cfg.get("count", 1)), 1)
+        self.video_shard_index = int(video_shard_cfg.get("index", 0))
+        if self.video_shard_index < 0 or self.video_shard_index >= self.video_shard_count:
+            raise ValueError(f"Invalid video shard index={self.video_shard_index} for shard_count={self.video_shard_count}")
         self._download_host_gate = threading.BoundedSemaphore(int(config["crawl"]["download"].get("max_inflight_per_host", 2)))
 
     @staticmethod
@@ -325,9 +331,12 @@ class AcquisitionService:
         count = 0
         for row in catalog.get("rows", []):
             for query_text in row.get("query_texts", []):
+                query_id = make_query_id(row["seed_id"], query_text)
+                if not self.query_repo.owns_query_id(query_id):
+                    continue
                 self.query_repo.upsert(
                     {
-                        "query_id": make_query_id(row["seed_id"], query_text),
+                        "query_id": query_id,
                         "seed_id": row["seed_id"],
                         "excel_row": row["excel_row"],
                         "scene_text": row["scene_text"],
@@ -340,6 +349,12 @@ class AcquisitionService:
                 )
                 count += 1
         return count
+
+    def _owns_video_id(self, platform: str, platform_video_id: str) -> bool:
+        if self.video_shard_count <= 1:
+            return True
+        digest = hashlib.sha1(f"{platform}:{platform_video_id}".encode("utf-8")).hexdigest()
+        return int(digest, 16) % self.video_shard_count == self.video_shard_index
 
     def _reject_reason(self, candidate: CandidateVideo) -> str | None:
         if not candidate.platform_video_id or not candidate.title or not candidate.url or candidate.duration_sec is None:
@@ -451,6 +466,7 @@ class AcquisitionService:
                     executor.submit(self.adapter.enrich, candidate): candidate.platform_video_id
                     for candidate in candidates
                     if not self.video_repo.exists(candidate.platform_video_id)
+                    and self._owns_video_id(candidate.platform, candidate.platform_video_id)
                 }
                 for future in as_completed(futures):
                     enriched = future.result()

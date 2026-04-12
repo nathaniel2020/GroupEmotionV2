@@ -27,6 +27,12 @@ crawl:
   max_video_size_mb: 300
   enrich_workers: 2
   max_items_per_query: 5
+  query_shard:
+    count: 1
+    index: 0
+  video_shard:
+    count: 1
+    index: 0
   download:
     enabled: true
     workers: 4
