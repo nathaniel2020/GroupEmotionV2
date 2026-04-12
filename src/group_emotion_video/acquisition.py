@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
 import re
 import threading
@@ -17,6 +18,18 @@ from .types import CandidateVideo, DownloadResult
 
 
 _QUERY_SPLIT_PATTERN = re.compile(r"[、,，/／|｜]+")
+_RETRYABLE_ERROR_PATTERNS = (
+    "http error 412",
+    "precondition failed",
+    "http error 429",
+    "too many requests",
+    "temporarily unavailable",
+    "timed out",
+    "timeout",
+    "connection reset",
+    "remote end closed connection",
+    "429 too many requests",
+)
 
 
 def _normalize_url(url: str | None) -> str | None:
@@ -150,7 +163,85 @@ class BilibiliAdapter:
         self._session = requests.Session()
         return self._session
 
-    def _extract_info(self, url: str, *, download: bool, output_dir: str | None = None, progress_label: str | None = None) -> dict[str, Any]:
+    def _cookie_value(self) -> str | None:
+        inline_cookie = str(self.source_cfg.get("cookie") or "").strip()
+        if inline_cookie:
+            return inline_cookie
+        env_name = str(self.source_cfg.get("cookie_env") or "BILIBILI_COOKIE").strip()
+        if not env_name:
+            return None
+        env_cookie = str(os.getenv(env_name) or "").strip()
+        return env_cookie or None
+
+    def _http_headers(self, *, user_agent: str | None = None) -> dict[str, str]:
+        headers = {
+            "Referer": "https://www.bilibili.com/",
+            "Origin": "https://www.bilibili.com",
+        }
+        if user_agent:
+            headers["User-Agent"] = user_agent
+        cookie = self._cookie_value()
+        if cookie:
+            headers["Cookie"] = cookie
+        return headers
+
+    def _retry_cfg(self) -> dict[str, float]:
+        cfg = (self.config.get("crawl") or {}).get("retry") or {}
+        return {
+            "max_attempts": max(int(cfg.get("max_attempts", 4)), 1),
+            "base_sleep_sec": max(float(cfg.get("base_sleep_sec", 60.0)), 0.0),
+            "max_sleep_sec": max(float(cfg.get("max_sleep_sec", 900.0)), 0.0),
+            "backoff_factor": max(float(cfg.get("backoff_factor", 2.0)), 1.0),
+            "jitter_sec": max(float(cfg.get("jitter_sec", 5.0)), 0.0),
+        }
+
+    @staticmethod
+    def _is_retryable_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return any(pattern in text for pattern in _RETRYABLE_ERROR_PATTERNS)
+
+    def _retry_sleep_sec(self, attempt: int) -> float:
+        cfg = self._retry_cfg()
+        delay = cfg["base_sleep_sec"] * (cfg["backoff_factor"] ** max(attempt - 1, 0))
+        delay = min(delay, cfg["max_sleep_sec"])
+        jitter_sec = cfg["jitter_sec"]
+        if jitter_sec > 0:
+            delay += random.uniform(0.0, jitter_sec)
+        return round(delay, 3)
+
+    def _log_retry(self, *, action: str, label: str, attempt: int, max_attempts: int, sleep_sec: float, exc: Exception) -> None:
+        if not self.logger:
+            return
+        self.logger.warning(
+            "acquisition_retry action=%s target=%s attempt=%s/%s sleep_sec=%s error=%s",
+            action,
+            label,
+            attempt,
+            max_attempts,
+            sleep_sec,
+            exc,
+        )
+
+    def _sleep_before_retry(self, *, action: str, label: str, attempt: int, max_attempts: int, exc: Exception) -> None:
+        sleep_sec = self._retry_sleep_sec(attempt)
+        self._log_retry(action=action, label=label, attempt=attempt, max_attempts=max_attempts, sleep_sec=sleep_sec, exc=exc)
+        time.sleep(sleep_sec)
+
+    def _request_with_retry(self, url: str, *, params: dict[str, Any] | None = None, timeout: int, label: str):
+        session = self._ensure_requests()
+        max_attempts = int(self._retry_cfg()["max_attempts"])
+        for attempt in range(1, max_attempts + 1):
+            try:
+                session.headers.update(self._http_headers(user_agent=random.choice(self._user_agents)))
+                response = session.get(url, params=params, timeout=timeout)
+                response.raise_for_status()
+                return response
+            except Exception as exc:
+                if attempt >= max_attempts or not self._is_retryable_error(exc):
+                    raise
+                self._sleep_before_retry(action="http_get", label=label, attempt=attempt, max_attempts=max_attempts, exc=exc)
+
+    def _run_yt_dlp_extract_info(self, url: str, *, download: bool, output_dir: str | None = None, progress_label: str | None = None) -> dict[str, Any]:
         try:
             from yt_dlp import YoutubeDL
         except ImportError as exc:  # pragma: no cover
@@ -166,14 +257,26 @@ class BilibiliAdapter:
             "socket_timeout": int(download_cfg.get("socket_timeout_sec", 30)),
             "noprogress": True,
             "progress_hooks": [self._build_progress_hook(progress_label or str(url))],
+            "http_headers": self._http_headers(user_agent=random.choice(self._user_agents)),
         }
         if output_dir is not None:
             options["outtmpl"] = str(Path(output_dir) / "%(id)s.%(ext)s")
         with YoutubeDL(options) as ydl:
             return ydl.extract_info(url, download=download)
 
+    def _extract_info(self, url: str, *, download: bool, output_dir: str | None = None, progress_label: str | None = None) -> dict[str, Any]:
+        max_attempts = int(self._retry_cfg()["max_attempts"])
+        label = progress_label or url
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return self._run_yt_dlp_extract_info(url, download=download, output_dir=output_dir, progress_label=progress_label)
+            except Exception as exc:
+                if attempt >= max_attempts or not self._is_retryable_error(exc):
+                    raise
+                self._sleep_before_retry(action="yt_dlp_extract", label=label, attempt=attempt, max_attempts=max_attempts, exc=exc)
+        raise RuntimeError(f"Failed to extract info for {label}")
+
     def search(self, query_text: str, limit: int) -> list[CandidateVideo]:
-        session = self._ensure_requests()
         output: list[CandidateVideo] = []
         seen_ids: set[str] = set()
         max_pages = int(self.source_cfg.get("max_pages_per_query", 1))
@@ -181,9 +284,12 @@ class BilibiliAdapter:
             params = {"keyword": query_text, "page": page}
             rows: list[dict[str, Any]] = []
             for url in self.SEARCH_URLS:
-                session.headers["User-Agent"] = random.choice(self._user_agents)
-                response = session.get(url, params=params, timeout=int(self.source_cfg.get("search_timeout_sec", 20)))
-                response.raise_for_status()
+                response = self._request_with_retry(
+                    url,
+                    params=params,
+                    timeout=int(self.source_cfg.get("search_timeout_sec", 20)),
+                    label=f"search:{query_text}:page={page}",
+                )
                 payload = response.json()
                 if payload.get("code") != 0:
                     continue
@@ -228,7 +334,6 @@ class BilibiliAdapter:
         return output
 
     def _fetch_subtitle_segments(self, info: dict[str, Any]) -> list[dict[str, Any]]:
-        session = self._ensure_requests()
         subtitle_sources = [info.get("subtitles") or {}, info.get("automatic_captions") or {}]
         for source in subtitle_sources:
             for entries in source.values():
@@ -237,8 +342,11 @@ class BilibiliAdapter:
                     ext = str(entry.get("ext") or "").lower()
                     if not url or ext not in {"json", "srt", "vtt"}:
                         continue
-                    response = session.get(url, timeout=int(self.source_cfg.get("enrich_timeout_sec", 30)))
-                    response.raise_for_status()
+                    response = self._request_with_retry(
+                        url,
+                        timeout=int(self.source_cfg.get("enrich_timeout_sec", 30)),
+                        label=f"subtitle:{info.get('id') or info.get('webpage_url') or url}",
+                    )
                     if ext == "json":
                         payload = response.json()
                         body = payload.get("body") or []

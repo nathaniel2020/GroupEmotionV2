@@ -19,13 +19,19 @@ crawl:
   max_video_size_mb: 300
   enrich_workers: 4
   max_items_per_query: 50
+  retry:
+    max_attempts: 5
+    base_sleep_sec: 120
+    max_sleep_sec: 1800
+    backoff_factor: 2.0
+    jitter_sec: 10
   query_shard:
     count: 3
     index: 0
   download:
     enabled: true
-    workers: 8
-    max_inflight_per_host: 8
+    workers: 4
+    max_inflight_per_host: 2
     retries: 8
     fragment_retries: 8
     socket_timeout_sec: 30

@@ -294,6 +294,9 @@ crawl:
 
 - `crawl.download.workers`：下载并发
 - `crawl.download.max_inflight_per_host`：单 host 并发上限
+- `crawl.retry.max_attempts`：B 站 412 / 429 / timeout 等瞬时错误的最大尝试次数
+- `crawl.retry.base_sleep_sec` / `max_sleep_sec` / `backoff_factor` / `jitter_sec`：失败后的退避 sleep 策略
+- `sources.bilibili.cookie_env`：从环境变量读取 B 站 cookie，默认读取 `BILIBILI_COOKIE`
 - `service.download_loop.max_queries_per_cycle`：每个 loop 最多消费多少 query
 - `service.download_loop.max_queries_per_cycle: 0`：表示不限制，当前能跑多少就跑多少
 - `service.download_loop.auto_seed_if_empty`：空库时自动 `seed-queries`
@@ -321,6 +324,18 @@ crawl:
 - `service.pipeline_loop.queue_max_clips: 0`：表示不设待标注队列上限
 
 当前完整示例 profile 默认就是“download 尽可能多抓 + pipeline 只要有视频/clip就处理 + VLLM 并行请求”的配置。
+
+如果 B 站开始返回 `HTTP Error 412: Precondition Failed`，优先做两件事：
+
+- 降低 `crawl.download.max_inflight_per_host`
+- 增大 `crawl.retry.base_sleep_sec`
+
+如果需要带登录态抓取，不要把明文 cookie 提交进 Git。当前代码会自动读取环境变量：
+
+```bash
+export BILIBILI_COOKIE='你的完整 cookie'
+python scripts/run_pipeline.py --config configs/profiles/continuous_vllm_pipeline.yaml download-loop
+```
 
 ## `status` 解读
 

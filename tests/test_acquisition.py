@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from group_emotion_video.acquisition import build_search_query
+from pathlib import Path
+
+import group_emotion_video.acquisition as acquisition_module
+from group_emotion_video.acquisition import BilibiliAdapter, build_search_query
+from group_emotion_video.types import CandidateVideo
 
 
 def test_build_search_query_prefers_parenthetical_aliases_and_scene_markers() -> None:
@@ -28,3 +32,108 @@ def test_build_search_query_scene_only_keeps_trigger_constraints() -> None:
         "query_text": "封闭室内大空间（礼堂/体育馆）",
     }
     assert build_search_query(query) == "礼堂 体育馆 当众表扬 荣誉称号 竞赛获奖 推荐提名"
+
+
+def _adapter_config() -> dict:
+    return {
+        "sources": {
+            "bilibili": {
+                "max_pages_per_query": 1,
+                "search_timeout_sec": 10,
+                "enrich_timeout_sec": 10,
+            }
+        },
+        "crawl": {
+            "retry": {
+                "max_attempts": 3,
+                "base_sleep_sec": 0.01,
+                "max_sleep_sec": 0.01,
+                "backoff_factor": 1.0,
+                "jitter_sec": 0.0,
+            },
+            "download": {
+                "retries": 1,
+                "fragment_retries": 1,
+                "socket_timeout_sec": 10,
+            },
+        },
+    }
+
+
+class _RetryingExtractAdapter(BilibiliAdapter):
+    def __init__(self, config: dict, failures: list[Exception]):
+        super().__init__(config)
+        self.failures = list(failures)
+        self.calls = 0
+
+    def _run_yt_dlp_extract_info(self, url: str, *, download: bool, output_dir: str | None = None, progress_label: str | None = None) -> dict:
+        self.calls += 1
+        if self.failures:
+            raise self.failures.pop(0)
+        if download:
+            output_path = Path(output_dir or ".") / "BV1TEST12345.mp4"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"fake-video")
+            return {
+                "id": "BV1TEST12345",
+                "ext": "mp4",
+                "requested_downloads": [{"filepath": str(output_path)}],
+            }
+        return {
+            "id": "BV1TEST12345",
+            "title": "课堂欢呼",
+            "duration": 36,
+            "webpage_url": url,
+            "tags": ["课堂"],
+        }
+
+
+def _candidate() -> CandidateVideo:
+    return CandidateVideo(
+        platform="bilibili",
+        platform_video_id="BV1TEST12345",
+        url="https://www.bilibili.com/video/BV1TEST12345",
+        title="课堂欢呼",
+        duration_sec=36.0,
+    )
+
+
+def test_bilibili_adapter_download_retries_after_412(tmp_path: Path, monkeypatch) -> None:
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(acquisition_module.time, "sleep", lambda sec: sleep_calls.append(sec))
+    adapter = _RetryingExtractAdapter(
+        _adapter_config(),
+        failures=[Exception("ERROR: [BiliBili] 116389872472343: Unable to download webpage: HTTP Error 412: Precondition Failed")],
+    )
+
+    result = adapter.download(_candidate(), str(tmp_path))
+
+    assert result.status == "downloaded"
+    assert adapter.calls == 2
+    assert sleep_calls == [0.01]
+
+
+def test_bilibili_adapter_enrich_retries_after_timeout(monkeypatch) -> None:
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(acquisition_module.time, "sleep", lambda sec: sleep_calls.append(sec))
+    adapter = _RetryingExtractAdapter(
+        _adapter_config(),
+        failures=[Exception("The read operation timed out")],
+    )
+
+    enriched = adapter.enrich(_candidate())
+
+    assert enriched.title == "课堂欢呼"
+    assert adapter.calls == 2
+    assert sleep_calls == [0.01]
+
+
+def test_bilibili_adapter_http_headers_include_cookie_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("BILIBILI_COOKIE", "SESSDATA=test; bili_jct=test")
+    adapter = BilibiliAdapter(_adapter_config())
+
+    headers = adapter._http_headers(user_agent="UA_TEST")
+
+    assert headers["User-Agent"] == "UA_TEST"
+    assert headers["Cookie"] == "SESSDATA=test; bili_jct=test"
+    assert headers["Referer"] == "https://www.bilibili.com/"
