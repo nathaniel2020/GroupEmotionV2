@@ -5,6 +5,7 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
+from group_emotion_video.cli import main as cli_main
 from group_emotion_video.types import CandidateVideo, DownloadResult
 from group_emotion_video.workflow import Workflow
 
@@ -280,6 +281,108 @@ def test_workflow_end_to_end_offline(tmp_path: Path) -> None:
     assert status["projection_5d"]["yield_assumptions"]["done_rate_after_annotation"] == 1.0
 
 
+def test_prepare_reference_accepts_manual_input_paths_from_cli(tmp_path: Path, capsys) -> None:
+    excel_path = tmp_path / "manual_seed.xlsx"
+    schema_path = tmp_path / "manual_schema.json"
+    label_seed_path = tmp_path / "manual_labels.json"
+    config_path = tmp_path / "config.yaml"
+    query_seed_catalog_path = tmp_path / "outputs" / "query_seed_catalog.json"
+    annotation_domains_path = tmp_path / "outputs" / "annotation_domains.json"
+
+    _write_seed_excel(excel_path)
+    _write_schema_json(schema_path)
+    label_seed_path.write_text(json.dumps({"labels": ["Joy", "Anxiety"]}, ensure_ascii=False), encoding="utf-8")
+    config_path.write_text(
+        "\n".join(
+            [
+                "project:",
+                "  data_dir: data",
+                "  runtime_dir: runtime",
+                "  reference_dir: data/reference",
+                "  query_seed_catalog_path: data/reference/query_seed_catalog.json",
+                "  annotation_domains_path: data/reference/annotation_domains.json",
+                "  query_seed_excel_path: missing.xlsx",
+                "  query_seed_sheet_name: 情感因素",
+                "  annotation_schema_source_path: missing_schema.json",
+                "  group_emotion_label_seed_path: missing_labels.json",
+                "sources:",
+                "  default: bilibili",
+                "  bilibili:",
+                "    enabled: true",
+                "crawl:",
+                "  max_queries_per_run: 1",
+                "  min_duration_sec: 15",
+                "  max_duration_sec: 1200",
+                "  max_video_size_mb: 300",
+                "  enrich_workers: 1",
+                "  max_items_per_query: 1",
+                "  download:",
+                "    enabled: false",
+                "preprocessing:",
+                "  max_videos_per_run: 1",
+                "  workers: 1",
+                "  prefer_subtitles: true",
+                "  fixed_window_sec: 12",
+                "  overlap_sec: 2",
+                "  subtitle_target_min_sec: 8",
+                "  subtitle_target_max_sec: 15",
+                "  min_clip_duration_sec: 4",
+                "  max_clip_duration_sec: 20",
+                "  clip_export_mode: copy",
+                "  keyframe_count: 2",
+                "  use_llm_filter: false",
+                "  duplicate_overlap_threshold: 0.8",
+                "annotation:",
+                "  max_clips_per_run: 1",
+                "  clip_workers: 1",
+                "  min_overall_confidence: 0.6",
+                "  export_requires_review_clear: false",
+                "llm:",
+                "  enabled: false",
+                "  base_url: https://example.com/v1",
+                "  api_key_env: OPENAI_API_KEY",
+                "  model: dummy",
+                "  timeout_sec: 30",
+                "  temperature: 0.1",
+                "  max_images_per_prompt: 0",
+                "  parallel:",
+                "    enabled: false",
+                "    max_inflight_requests: 1",
+                "    acquire_timeout_sec: 30",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = cli_main(
+        [
+            "--config",
+            str(config_path),
+            "prepare-reference",
+            "--excel-path",
+            str(excel_path),
+            "--sheet-name",
+            "情感因素",
+            "--schema-source-path",
+            str(schema_path),
+            "--label-seed-path",
+            str(label_seed_path),
+            "--query-seed-catalog-path",
+            str(query_seed_catalog_path),
+            "--annotation-domains-path",
+            str(annotation_domains_path),
+        ]
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert Path(payload["query_seed_catalog_path"]).resolve() == query_seed_catalog_path.resolve()
+    assert Path(payload["annotation_domains_path"]).resolve() == annotation_domains_path.resolve()
+    assert query_seed_catalog_path.exists()
+    assert annotation_domains_path.exists()
+
+
 def test_service_loops_process_download_and_pipeline(tmp_path: Path) -> None:
     excel_path = tmp_path / "原子情感因素.xlsx"
     schema_path = tmp_path / "schema.json"
@@ -369,6 +472,89 @@ def test_service_loops_process_download_and_pipeline(tmp_path: Path) -> None:
     assert pipeline_status["clips"]["pending_annotation"] == 0
     assert pipeline_status["clips"]["annotating"] == 0
     assert pipeline_status["annotations"]["done"] == 1
+
+
+def test_download_loop_auto_prepares_reference_when_missing(tmp_path: Path) -> None:
+    excel_path = tmp_path / "原子情感因素.xlsx"
+    schema_path = tmp_path / "schema.json"
+    label_seed_path = tmp_path / "labels.json"
+    _write_seed_excel(excel_path)
+    _write_schema_json(schema_path)
+    label_seed_path.write_text(json.dumps({"labels": ["Joy", "Anxiety"]}, ensure_ascii=False), encoding="utf-8")
+
+    config = {
+        "project": {
+            "name": "test_project",
+            "root_dir": str(tmp_path),
+            "data_dir": "data",
+            "runtime_dir": "runtime",
+            "reference_dir": "data/reference",
+            "query_seed_catalog_path": "data/reference/query_seed_catalog.json",
+            "annotation_domains_path": "data/reference/annotation_domains.json",
+            "query_seed_excel_path": str(excel_path),
+            "query_seed_sheet_name": "情感因素",
+            "annotation_schema_source_path": str(schema_path),
+            "group_emotion_label_seed_path": str(label_seed_path),
+        },
+        "sources": {
+            "default": "bilibili",
+            "bilibili": {"enabled": True, "max_pages_per_query": 1, "max_items_per_query": 3},
+        },
+        "crawl": {
+            "max_queries_per_run": 10,
+            "min_duration_sec": 15,
+            "max_duration_sec": 1200,
+            "max_video_size_mb": 300,
+            "enrich_workers": 1,
+            "max_items_per_query": 3,
+            "download": {"enabled": True, "workers": 1, "max_inflight_per_host": 1, "retries": 1, "fragment_retries": 1, "socket_timeout_sec": 10},
+        },
+        "preprocessing": {
+            "max_videos_per_run": 5,
+            "workers": 1,
+            "prefer_subtitles": True,
+            "fixed_window_sec": 12,
+            "overlap_sec": 2,
+            "subtitle_target_min_sec": 8,
+            "subtitle_target_max_sec": 15,
+            "min_clip_duration_sec": 4,
+            "max_clip_duration_sec": 20,
+            "clip_export_mode": "copy",
+            "keyframe_count": 2,
+            "use_llm_filter": False,
+            "duplicate_overlap_threshold": 0.8,
+        },
+        "annotation": {"max_clips_per_run": 10, "clip_workers": 2, "min_overall_confidence": 0.6, "export_requires_review_clear": False},
+        "llm": {
+            "enabled": False,
+            "base_url": "https://yunwu.ai/v1/",
+            "api_key_env": "YUNWU_API_KEY",
+            "model": "gemini-3.1-pro-preview",
+            "timeout_sec": 30,
+            "temperature": 0.1,
+            "max_images_per_prompt": 2,
+            "parallel": {"enabled": True, "max_inflight_requests": 2, "acquire_timeout_sec": 30},
+        },
+        "service": {
+            "download_loop": {
+                "auto_prepare_reference_if_missing": True,
+                "max_queries_per_cycle": 10,
+                "auto_seed_if_empty": True,
+                "auto_refill_done_queries": False,
+                "poll_interval_sec": 0.01,
+                "idle_sleep_sec": 0.01,
+                "max_cycles": 1,
+                "stop_when_idle": False,
+            }
+        },
+    }
+
+    workflow = Workflow(config, adapter=FakeBilibiliAdapter(), annotator=FakeAnnotator())
+    download_status = workflow.download_loop()
+
+    assert (tmp_path / "data" / "reference" / "query_seed_catalog.json").exists()
+    assert (tmp_path / "data" / "reference" / "annotation_domains.json").exists()
+    assert download_status["queries"]["done"] == 3
 
 
 def test_download_loop_auto_seeds_and_recycles_queries(tmp_path: Path) -> None:

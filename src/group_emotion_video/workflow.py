@@ -58,22 +58,52 @@ class Workflow:
     def from_config_paths(cls, config_paths: str | list[str] | None = None, **kwargs: Any) -> "Workflow":
         return cls(load_config(config_paths), **kwargs)
 
-    def _require_reference(self) -> tuple[Path, Path]:
+    def _reference_paths(self) -> tuple[Path, Path]:
         query_seed_catalog_path = self._resolve_path(self.config["project"]["query_seed_catalog_path"])
         annotation_domains_path = self._resolve_path(self.config["project"]["annotation_domains_path"])
-        if not query_seed_catalog_path.exists() or not annotation_domains_path.exists():
-            raise FileNotFoundError("Reference files are missing. Run `prepare-reference` first.")
         return query_seed_catalog_path, annotation_domains_path
 
-    def prepare_reference(self) -> dict[str, str]:
+    def _require_reference(self) -> tuple[Path, Path]:
+        query_seed_catalog_path, annotation_domains_path = self._reference_paths()
+        if not query_seed_catalog_path.exists() or not annotation_domains_path.exists():
+            raise FileNotFoundError(
+                "Reference files are missing. "
+                f"Expected: {query_seed_catalog_path} and {annotation_domains_path}. "
+                "Run `prepare-reference` first."
+            )
+        return query_seed_catalog_path, annotation_domains_path
+
+    def _ensure_reference_available(self, *, auto_prepare: bool = False) -> tuple[Path, Path]:
+        query_seed_catalog_path, annotation_domains_path = self._reference_paths()
+        if query_seed_catalog_path.exists() and annotation_domains_path.exists():
+            return query_seed_catalog_path, annotation_domains_path
+        if auto_prepare:
+            self.logger.info(
+                "reference_missing auto_prepare=true query_seed_catalog_path=%s annotation_domains_path=%s",
+                query_seed_catalog_path,
+                annotation_domains_path,
+            )
+            self.prepare_reference()
+        return self._require_reference()
+
+    def prepare_reference(
+        self,
+        *,
+        excel_path: str | Path | None = None,
+        sheet_name: str | None = None,
+        schema_source_path: str | Path | None = None,
+        label_seed_path: str | Path | None = None,
+        query_seed_catalog_path: str | Path | None = None,
+        annotation_domains_path: str | Path | None = None,
+    ) -> dict[str, str]:
         project = self.config["project"]
         outputs = prepare_reference_files(
-            excel_path=self._resolve_path(project["query_seed_excel_path"]),
-            sheet_name=project["query_seed_sheet_name"],
-            schema_source_path=self._resolve_path(project["annotation_schema_source_path"]),
-            label_seed_path=self._resolve_path(project["group_emotion_label_seed_path"]),
-            query_seed_catalog_path=self._resolve_path(project["query_seed_catalog_path"]),
-            annotation_domains_path=self._resolve_path(project["annotation_domains_path"]),
+            excel_path=self._resolve_path(excel_path or project["query_seed_excel_path"]),
+            sheet_name=sheet_name or project["query_seed_sheet_name"],
+            schema_source_path=self._resolve_path(schema_source_path or project["annotation_schema_source_path"]),
+            label_seed_path=self._resolve_path(label_seed_path or project["group_emotion_label_seed_path"]),
+            query_seed_catalog_path=self._resolve_path(query_seed_catalog_path or project["query_seed_catalog_path"]),
+            annotation_domains_path=self._resolve_path(annotation_domains_path or project["annotation_domains_path"]),
         )
         return {key: str(path) for key, path in outputs.items()}
 
@@ -157,8 +187,8 @@ class Workflow:
         }
 
     def download_loop(self) -> dict[str, Any]:
-        self._require_reference()
         cfg = self._loop_cfg("download_loop")
+        self._ensure_reference_available(auto_prepare=bool(cfg.get("auto_prepare_reference_if_missing", True)))
         cycle = 0
         while True:
             cycle += 1
@@ -172,8 +202,8 @@ class Workflow:
         return self.status()
 
     def pipeline_loop(self) -> dict[str, Any]:
-        self._require_reference()
         cfg = self._loop_cfg("pipeline_loop")
+        self._ensure_reference_available(auto_prepare=bool(cfg.get("auto_prepare_reference_if_missing", True)))
         preprocess_service = self._build_preprocessing_service()
         annotation_service = self._build_annotation_service()
         preprocess_workers = max(1, int(self.config["preprocessing"].get("workers", 1)))

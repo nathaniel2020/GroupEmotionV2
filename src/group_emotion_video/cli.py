@@ -11,7 +11,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", action="append", dest="config_paths", default=[])
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    for name in ("prepare-reference", "seed-queries", "crawl", "preprocess", "annotate", "download-loop", "pipeline-loop", "export", "status"):
+    prepare_reference_parser = subparsers.add_parser("prepare-reference")
+    prepare_reference_parser.add_argument("--excel-path", dest="excel_path")
+    prepare_reference_parser.add_argument("--sheet-name", dest="sheet_name")
+    prepare_reference_parser.add_argument("--schema-source-path", dest="schema_source_path")
+    prepare_reference_parser.add_argument("--label-seed-path", dest="label_seed_path")
+    prepare_reference_parser.add_argument("--query-seed-catalog-path", dest="query_seed_catalog_path")
+    prepare_reference_parser.add_argument("--annotation-domains-path", dest="annotation_domains_path")
+
+    for name in ("seed-queries", "crawl", "preprocess", "annotate", "download-loop", "pipeline-loop", "export", "status"):
         subparsers.add_parser(name)
 
     run_parser = subparsers.add_parser("run")
@@ -25,7 +33,14 @@ def main(argv: list[str] | None = None) -> int:
     workflow = Workflow.from_config_paths(args.config_paths)
 
     if args.command == "prepare-reference":
-        result = workflow.prepare_reference()
+        result = workflow.prepare_reference(
+            excel_path=args.excel_path,
+            sheet_name=args.sheet_name,
+            schema_source_path=args.schema_source_path,
+            label_seed_path=args.label_seed_path,
+            query_seed_catalog_path=args.query_seed_catalog_path,
+            annotation_domains_path=args.annotation_domains_path,
+        )
     elif args.command == "seed-queries":
         result = workflow.seed_queries()
     elif args.command == "crawl":

@@ -71,6 +71,7 @@ llm:
 
 service:
   download_loop:
+    auto_prepare_reference_if_missing: true
     max_queries_per_cycle: 20
     auto_seed_if_empty: true
     auto_refill_done_queries: true
@@ -84,6 +85,7 @@ service:
     stop_when_queries_done: false
 
   pipeline_loop:
+    auto_prepare_reference_if_missing: true
     preprocess_claim_limit: 2
     annotation_trigger_size: 16
     annotation_batch_size: 4

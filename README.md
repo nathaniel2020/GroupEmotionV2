@@ -59,6 +59,18 @@ pip install -e .
 python scripts/run_pipeline.py prepare-reference
 ```
 
+如果配置里的源文件路径不对，也可以手动指定 `prepare-reference` 的输入/输出路径：
+
+```bash
+python scripts/run_pipeline.py prepare-reference \
+  --excel-path /path/to/原子情感因素.xlsx \
+  --sheet-name 情感因素 \
+  --schema-source-path /path/to/标注字段.xlsx \
+  --label-seed-path configs/group_emotion_labels.seed.json \
+  --query-seed-catalog-path data/reference/query_seed_catalog.json \
+  --annotation-domains-path data/reference/annotation_domains.json
+```
+
 如果你想手动初始化 query，可以执行：
 
 ```bash
@@ -119,6 +131,7 @@ python scripts/run_pipeline.py \
 `download-loop` 的特点：
 
 - 下载是单独进程，适合长期运行
+- 如果 reference JSON 不存在，会先自动执行一轮 `prepare-reference`
 - 每个视频会打印 `download_start / download_progress / download_finish`
 - 循环快照里会看到 `downloading / downloaded / pending_preprocess`
 - 当 `queries` 表为空时可自动补种
@@ -127,6 +140,7 @@ python scripts/run_pipeline.py \
 
 `pipeline-loop` 的特点：
 
+- 如果 reference JSON 不存在，会先自动执行一轮 `prepare-reference`
 - 预处理和标注不是两个完全割裂的阶段，而是联动流水线
 - accepted clip 会先进入待标注队列
 - 当待标注 clip 达到 `annotation_trigger_size`，或最老待标注 clip 等待超过 `annotation_trigger_timeout_sec`，就会触发并行标注
