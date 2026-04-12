@@ -4,6 +4,11 @@
 
 `prepare-reference -> seed-queries -> crawl -> preprocess -> annotate -> export`
 
+当前推荐的在线运行模式是两进程：
+
+- `download-loop`：单独负责 query 消费、B 站检索、enrich、下载，并持续打印下载日志
+- `pipeline-loop`：负责“预处理 -> accepted clip 队列 -> 并行标注”的联动流水线
+
 核心约束：
 
 - 运行期只读取本地 reference JSON，不再重复解析 Excel。
@@ -17,7 +22,7 @@
 - Python `>=3.11`
 - `ffmpeg`
 - 网络可访问 B 站和所配置的大模型服务
-- 若启用 LLM：设置环境变量 `YUNWU_API_KEY` 或对应 `llm.api_key_env`
+- 若启用 LLM：设置环境变量 `YUNWU_API_KEY`、`OPENAI_API_KEY` 或对应 `llm.api_key_env`
 
 安装：
 
@@ -37,12 +42,15 @@ pip install -e .
 - 预处理并发：`preprocessing.workers`
 - clip 标注并发：`annotation.clip_workers`
 - 全局 LLM 请求并发：`llm.parallel.max_inflight_requests`
+- 服务循环参数：`service.download_loop.*`、`service.pipeline_loop.*`
 
-烟雾测试 profile 在 [configs/profiles/gemini_yunwu_smoke.yaml](configs/profiles/gemini_yunwu_smoke.yaml)。
+可用 profile：
 
-隔离在线 smoke profile 在 [configs/profiles/online_smoke.yaml](configs/profiles/online_smoke.yaml)。
+- 烟雾测试：[configs/profiles/gemini_yunwu_smoke.yaml](configs/profiles/gemini_yunwu_smoke.yaml)
+- 隔离在线 smoke：[configs/profiles/online_smoke.yaml](configs/profiles/online_smoke.yaml)
+- 双进程常驻运行完整示例：[configs/profiles/continuous_vllm_pipeline.yaml](configs/profiles/continuous_vllm_pipeline.yaml)
 
-## 运行
+## 初始化
 
 先准备 reference：
 
@@ -50,10 +58,17 @@ pip install -e .
 python scripts/run_pipeline.py prepare-reference
 ```
 
-然后按阶段运行：
+然后把 query 写入 SQLite：
 
 ```bash
 python scripts/run_pipeline.py seed-queries
+```
+
+## 单阶段运行
+
+按阶段手动执行：
+
+```bash
 python scripts/run_pipeline.py crawl
 python scripts/run_pipeline.py preprocess
 python scripts/run_pipeline.py annotate
@@ -61,7 +76,9 @@ python scripts/run_pipeline.py export
 python scripts/run_pipeline.py status
 ```
 
-也可以一次串起来：
+`status` 会输出 query / video / clip / annotation 的计数、下载/预处理/标注平均耗时，以及基于当前均值和 worker 配置的 `projection_5d` 估算。
+
+也可以一次串行执行：
 
 ```bash
 python scripts/run_pipeline.py run --steps prepare-reference,seed-queries,crawl,preprocess,annotate,export,status
@@ -72,6 +89,77 @@ python scripts/run_pipeline.py run --steps prepare-reference,seed-queries,crawl,
 ```bash
 python scripts/run_pipeline.py --config configs/profiles/gemini_yunwu_smoke.yaml run --steps prepare-reference,seed-queries,crawl,preprocess,annotate
 ```
+
+## 双进程服务模式
+
+推荐开两个终端。
+
+终端 1，下载进程：
+
+```bash
+python scripts/run_pipeline.py \
+  --config configs/profiles/continuous_vllm_pipeline.yaml \
+  download-loop
+```
+
+终端 2，预处理 + 标注流水线：
+
+```bash
+python scripts/run_pipeline.py \
+  --config configs/profiles/continuous_vllm_pipeline.yaml \
+  pipeline-loop
+```
+
+`download-loop` 的特点：
+
+- 下载是单独进程，适合长期运行
+- 每个视频会打印 `download_start / download_progress / download_finish`
+- 循环快照里会看到 `downloading / downloaded / pending_preprocess`
+
+`pipeline-loop` 的特点：
+
+- 预处理和标注不是两个完全割裂的阶段，而是联动流水线
+- accepted clip 会先进入待标注队列
+- 当待标注 clip 达到 `annotation_trigger_size`，或最老待标注 clip 等待超过 `annotation_trigger_timeout_sec`，就会触发并行标注
+- 如果待标注队列达到 `queue_max_clips`，会对预处理形成反压，避免 clip 无限堆积
+
+这里不做“总百分比进度条”，因为总视频数和总 clip 数都在动态变化。更合适的是动态快照日志。
+
+## 关键配置
+
+下载侧：
+
+- `crawl.download.workers`：下载并发
+- `crawl.download.max_inflight_per_host`：单 host 并发上限
+- `service.download_loop.max_queries_per_cycle`：每个 loop 最多消费多少 query
+- `service.download_loop.poll_interval_sec`
+- `service.download_loop.idle_sleep_sec`
+
+流水线侧：
+
+- `preprocessing.workers`：并行预处理视频数
+- `annotation.clip_workers`：并行标注 clip 数
+- `llm.parallel.max_inflight_requests`：并行发给 VLLM / OpenAI-compatible 服务的请求上限
+- `service.pipeline_loop.preprocess_claim_limit`：每轮 claim 多少视频进入预处理
+- `service.pipeline_loop.annotation_trigger_size`：待标注 clip 达到多少开始派发
+- `service.pipeline_loop.annotation_batch_size`：每次派发多少 clip 给标注 worker
+- `service.pipeline_loop.annotation_trigger_timeout_sec`：待标注队列没攒够也最多等多久
+- `service.pipeline_loop.queue_max_clips`：待标注队列上限，超过后会暂停继续 claim 新视频
+
+当前完整示例 profile 默认就是“download 单独进程 + preprocess/annotate 联动流水线 + VLLM 并行请求”的配置。
+
+## `status` 解读
+
+`python scripts/run_pipeline.py status` 会返回：
+
+- `queries`：`pending / retry / done`
+- `videos`：`downloading / downloaded / pending_preprocess / preprocessing / processed`
+- `clips`：`accepted / rejected / pending_annotation / annotating`
+- `annotations`：`done / rejected / failed / completed`
+- `average_durations_sec`：下载、预处理、标注平均耗时
+- `projection_5d`：基于当前均值、accepted clip 产出率和 done rate 的 5 天估算
+
+如果库里样本还很少，`projection_5d` 会比较抖；先积累几轮真实运行数据再看更有意义。
 
 ## 目录约定
 
@@ -88,8 +176,9 @@ python scripts/run_pipeline.py --config configs/profiles/gemini_yunwu_smoke.yaml
 ## 当前实现范围
 
 - 已实现离线可测的 reference 准备、query 入库、B 站候选采集、并行下载、切分/过滤、并行标注、导出。
+- 已实现双 loop 服务模式：`download-loop` 和 `pipeline-loop`。
 - 标注字段值域做了严格校验，accepted 样本必须通过 schema 检查。
-- 测试已覆盖 reference 生成、值域校验、LLM 并发闸门、离线 E2E。
+- 测试已覆盖 reference 生成、值域校验、LLM 并发闸门、离线 E2E、服务模式 loop。
 - 已完成一轮真实在线 smoke：B 站抓取、下载、切分、在线标注、导出都已跑通。
 
 当前未覆盖：
@@ -100,4 +189,4 @@ python scripts/run_pipeline.py --config configs/profiles/gemini_yunwu_smoke.yaml
 ## 仓库清洁约定
 
 - `runtime/`、`data/reference/*.json`、缓存目录和本地 smoke 运行产物都不应提交。
-- 需要复现 smoke 时，直接使用 `configs/profiles/online_smoke.yaml` 重新跑，不保留历史运行目录。
+- 需要复现 smoke 时，直接使用 profile 重新跑，不保留历史运行目录。

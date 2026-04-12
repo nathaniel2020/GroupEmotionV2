@@ -4,7 +4,9 @@ import json
 import random
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -95,15 +97,41 @@ class BilibiliAdapter:
         "https://api.bilibili.com/x/web-interface/wbi/search/all/v2",
     ]
 
-    def __init__(self, config: dict[str, Any]):
+    def __init__(self, config: dict[str, Any], *, logger: Any | None = None):
         self.config = config
         self.source_cfg = config["sources"]["bilibili"]
+        self.logger = logger
         self._requests = None
         self._session = None
         self._user_agents = [
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         ]
+
+    def _build_progress_hook(self, video_id: str):
+        last_bucket = {"value": -1}
+
+        def hook(payload: dict[str, Any]) -> None:
+            if not self.logger:
+                return
+            status = str(payload.get("status") or "")
+            if status == "finished":
+                self.logger.info("download_progress bvid=%s percent=100", video_id)
+                return
+            if status != "downloading":
+                return
+            downloaded_bytes = payload.get("downloaded_bytes") or 0
+            total_bytes = payload.get("total_bytes") or payload.get("total_bytes_estimate") or 0
+            if not total_bytes:
+                return
+            percent = int((float(downloaded_bytes) / float(total_bytes)) * 100)
+            bucket = min(10, percent // 10)
+            if bucket <= last_bucket["value"]:
+                return
+            last_bucket["value"] = bucket
+            self.logger.info("download_progress bvid=%s percent=%s", video_id, bucket * 10)
+
+        return hook
 
     def _ensure_requests(self):
         if self._session is not None:
@@ -116,7 +144,7 @@ class BilibiliAdapter:
         self._session = requests.Session()
         return self._session
 
-    def _extract_info(self, url: str, *, download: bool, output_dir: str | None = None) -> dict[str, Any]:
+    def _extract_info(self, url: str, *, download: bool, output_dir: str | None = None, progress_label: str | None = None) -> dict[str, Any]:
         try:
             from yt_dlp import YoutubeDL
         except ImportError as exc:  # pragma: no cover
@@ -131,6 +159,7 @@ class BilibiliAdapter:
             "fragment_retries": int(download_cfg.get("fragment_retries", 8)),
             "socket_timeout": int(download_cfg.get("socket_timeout_sec", 30)),
             "noprogress": True,
+            "progress_hooks": [self._build_progress_hook(progress_label or str(url))],
         }
         if output_dir is not None:
             options["outtmpl"] = str(Path(output_dir) / "%(id)s.%(ext)s")
@@ -225,7 +254,7 @@ class BilibiliAdapter:
         return []
 
     def enrich(self, candidate: CandidateVideo) -> CandidateVideo:
-        info = self._extract_info(candidate.url, download=False)
+        info = self._extract_info(candidate.url, download=False, progress_label=candidate.platform_video_id)
         subtitle_segments = self._fetch_subtitle_segments(info)
         return CandidateVideo(
             platform=candidate.platform,
@@ -256,9 +285,13 @@ class BilibiliAdapter:
         )
 
     def download(self, candidate: CandidateVideo, output_dir: str) -> DownloadResult:
+        if self.logger:
+            self.logger.info("download_start bvid=%s title=%s", candidate.platform_video_id, candidate.title)
         try:
-            info = self._extract_info(candidate.url, download=True, output_dir=output_dir)
+            info = self._extract_info(candidate.url, download=True, output_dir=output_dir, progress_label=candidate.platform_video_id)
         except Exception as exc:  # pragma: no cover
+            if self.logger:
+                self.logger.exception("download_failed bvid=%s error=%s", candidate.platform_video_id, exc)
             return DownloadResult(status="failed", error_message=str(exc))
         requested = info.get("requested_downloads") or []
         local_path = None
@@ -268,6 +301,8 @@ class BilibiliAdapter:
             local_path = str(Path(output_dir) / f"{info.get('id', candidate.platform_video_id)}.{info.get('ext', 'mp4')}")
         path = Path(local_path)
         size = int(path.stat().st_size) if path.exists() else None
+        if self.logger:
+            self.logger.info("download_finish bvid=%s status=%s file_size_bytes=%s", candidate.platform_video_id, "downloaded" if path.exists() else "failed", size)
         return DownloadResult(status="downloaded" if path.exists() else "failed", local_path=str(path), file_size_bytes=size)
 
 
@@ -278,7 +313,7 @@ class AcquisitionService:
         self.video_repo = video_repo
         self.layout = layout
         self.logger = logger
-        self.adapter = adapter or BilibiliAdapter(config)
+        self.adapter = adapter or BilibiliAdapter(config, logger=logger)
         self._download_host_gate = threading.BoundedSemaphore(int(config["crawl"]["download"].get("max_inflight_per_host", 2)))
 
     @staticmethod
@@ -330,7 +365,21 @@ class AcquisitionService:
         path.mkdir(parents=True, exist_ok=True)
         (path / f"{video_uid}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def _serialize_video_meta(self, candidate: CandidateVideo, *, query: dict[str, Any], video_uid: str, download_status: str, reject_reason: str | None, retention_status: str | None, raw_video_path: str | None = None, file_size_bytes: int | None = None) -> dict[str, Any]:
+    def _serialize_video_meta(
+        self,
+        candidate: CandidateVideo,
+        *,
+        query: dict[str, Any],
+        video_uid: str,
+        download_status: str,
+        reject_reason: str | None,
+        retention_status: str | None,
+        raw_video_path: str | None = None,
+        file_size_bytes: int | None = None,
+        download_started_at: str | None = None,
+        download_finished_at: str | None = None,
+        download_elapsed_sec: float | None = None,
+    ) -> dict[str, Any]:
         metadata = dict(candidate.platform_metadata)
         extra = dict(candidate.extra)
         subtitle_segments = extra.get("subtitle_segments") or []
@@ -361,9 +410,15 @@ class AcquisitionService:
             "subtitles_available": bool(candidate.subtitles_available or subtitle_segments),
             "rights_status": metadata.get("rights_status", "unknown"),
             "download_status": download_status,
+            "download_started_at": download_started_at,
+            "download_finished_at": download_finished_at,
+            "download_elapsed_sec": download_elapsed_sec,
             "reject_reason": reject_reason,
             "retention_status": retention_status,
             "accepted_clip_count": 0,
+            "preprocess_started_at": None,
+            "preprocess_finished_at": None,
+            "preprocess_elapsed_sec": None,
             "raw_video_path": raw_video_path,
             "file_size_bytes": file_size_bytes,
             "platform_metadata": metadata,
@@ -373,6 +428,14 @@ class AcquisitionService:
     def _download_candidate(self, candidate: CandidateVideo, output_dir: Path) -> DownloadResult:
         with self._download_host_gate:
             return self.adapter.download(candidate, str(output_dir))
+
+    def _timed_download_candidate(self, candidate: CandidateVideo, output_dir: Path) -> tuple[DownloadResult, str, str, float]:
+        started_at = datetime.now().isoformat(timespec="seconds")
+        start_clock = time.perf_counter()
+        result = self._download_candidate(candidate, output_dir)
+        elapsed_sec = round(time.perf_counter() - start_clock, 3)
+        finished_at = datetime.now().isoformat(timespec="seconds")
+        return result, started_at, finished_at, elapsed_sec
 
     def crawl(self, limit: int | None = None) -> int:
         pending_queries = self.query_repo.list_pending(limit or int(self.config["crawl"]["max_queries_per_run"]))
@@ -414,14 +477,34 @@ class AcquisitionService:
             if accepted_for_download and bool(self.config["crawl"]["download"].get("enabled", True)):
                 output_root = self.layout["tmp_videos"] / _safe_dir_name(query["scene_text"])
                 output_root.mkdir(parents=True, exist_ok=True)
+                download_started_by_video_uid: dict[str, str] = {}
+                for candidate in accepted_for_download:
+                    video_uid = make_video_uid(candidate.platform, candidate.platform_video_id)
+                    started_at = datetime.now().isoformat(timespec="seconds")
+                    download_started_by_video_uid[video_uid] = started_at
+                    payload = self._serialize_video_meta(
+                        candidate,
+                        query=query,
+                        video_uid=video_uid,
+                        download_status="downloading",
+                        reject_reason=None,
+                        retention_status=None,
+                        raw_video_path=None,
+                        file_size_bytes=None,
+                        download_started_at=started_at,
+                        download_finished_at=None,
+                        download_elapsed_sec=None,
+                    )
+                    video_meta_path = self._write_video_meta(payload, video_uid=video_uid)
+                    self.video_repo.upsert({**payload, "video_meta_path": str(video_meta_path)})
                 with ThreadPoolExecutor(max_workers=int(self.config["crawl"]["download"].get("workers", 4))) as executor:
                     futures = {
-                        executor.submit(self._download_candidate, candidate, output_root): candidate
+                        executor.submit(self._timed_download_candidate, candidate, output_root): candidate
                         for candidate in accepted_for_download
                     }
                     for future in as_completed(futures):
                         candidate = futures[future]
-                        result = future.result()
+                        result, download_started_at, download_finished_at, download_elapsed_sec = future.result()
                         video_uid = make_video_uid(candidate.platform, candidate.platform_video_id)
                         reject_reason = None
                         retention_status = None
@@ -444,6 +527,9 @@ class AcquisitionService:
                             retention_status=retention_status,
                             raw_video_path=result.local_path if result.status == "downloaded" else None,
                             file_size_bytes=result.file_size_bytes,
+                            download_started_at=download_started_by_video_uid.get(video_uid, download_started_at),
+                            download_finished_at=download_finished_at,
+                            download_elapsed_sec=download_elapsed_sec,
                         )
                         video_meta_path = self._write_video_meta(payload, video_uid=video_uid)
                         if result.status != "downloaded":

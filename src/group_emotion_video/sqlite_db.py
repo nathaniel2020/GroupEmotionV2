@@ -96,9 +96,15 @@ def initialize_schema(db: SQLiteDB) -> None:
             subtitles_available INTEGER NOT NULL DEFAULT 0,
             rights_status TEXT NOT NULL,
             download_status TEXT NOT NULL,
+            download_started_at TEXT,
+            download_finished_at TEXT,
+            download_elapsed_sec REAL,
             reject_reason TEXT,
             retention_status TEXT,
             accepted_clip_count INTEGER NOT NULL DEFAULT 0,
+            preprocess_started_at TEXT,
+            preprocess_finished_at TEXT,
+            preprocess_elapsed_sec REAL,
             raw_video_path TEXT,
             video_meta_path TEXT,
             platform_metadata_json TEXT NOT NULL,
@@ -114,6 +120,7 @@ def initialize_schema(db: SQLiteDB) -> None:
             start_sec REAL NOT NULL,
             end_sec REAL NOT NULL,
             duration_sec REAL NOT NULL,
+            created_at TEXT,
             segmentation_mode TEXT NOT NULL,
             filter_status TEXT NOT NULL,
             filter_reasons_json TEXT NOT NULL,
@@ -133,6 +140,9 @@ def initialize_schema(db: SQLiteDB) -> None:
             annotation_uid TEXT PRIMARY KEY,
             clip_uid TEXT NOT NULL,
             status TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            elapsed_sec REAL,
             review_required INTEGER NOT NULL DEFAULT 0,
             final_annotation_json TEXT NOT NULL,
             field_confidence_json TEXT NOT NULL,
@@ -155,3 +165,39 @@ def initialize_schema(db: SQLiteDB) -> None:
         )
         """
     )
+    _ensure_columns(
+        db,
+        "videos",
+        {
+            "download_started_at": "TEXT",
+            "download_finished_at": "TEXT",
+            "download_elapsed_sec": "REAL",
+            "preprocess_started_at": "TEXT",
+            "preprocess_finished_at": "TEXT",
+            "preprocess_elapsed_sec": "REAL",
+        },
+    )
+    _ensure_columns(
+        db,
+        "annotations",
+        {
+            "started_at": "TEXT",
+            "finished_at": "TEXT",
+            "elapsed_sec": "REAL",
+        },
+    )
+    _ensure_columns(
+        db,
+        "clips",
+        {
+            "created_at": "TEXT",
+        },
+    )
+
+
+def _ensure_columns(db: SQLiteDB, table_name: str, columns: dict[str, str]) -> None:
+    existing_columns = {str(row["name"]) for row in db.fetchall(f"PRAGMA table_info({table_name})")}
+    for column_name, column_spec in columns.items():
+        if column_name in existing_columns:
+            continue
+        db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_spec}")

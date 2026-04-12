@@ -50,6 +50,23 @@
   - 首次在线标注在 `gemini-3.1-pro-preview` 上超时；切换到 `gemini-3.1-flash-lite-preview` 且使用文本优先后成功完成标注。
   - 成功导出 1 个 accepted clip 到 `runtime/online_smoke/exports/dataset_export_20260412_194157/`。
 
+### Phase 7: Status Metrics & Estimation
+- **Status:** complete
+- Actions taken:
+  - 为 `videos` / `annotations` 表补充下载、预处理、标注的开始时间、结束时间和耗时字段，并对已有 SQLite 自动迁移。
+  - 扩展 `Workflow.status()`，输出已下载视频数、待预处理视频数、CLIP 总数、待标注 CLIP 数、DONE/Reject/failed 计数和阶段平均耗时。
+  - 新增基于当前平均耗时、accepted clip 产出率和 worker 配置的 `projection_5d` 估算。
+  - 更新离线 E2E 测试，覆盖新的 `status` 结构和关键统计字段。
+
+### Phase 8: Continuous Service Mode
+- **Status:** complete
+- Actions taken:
+  - 新增 CLI 子命令 `download-loop` 和 `pipeline-loop`，支持把下载与预处理/标注拆成两个常驻进程。
+  - 下载阶段增加 `download_start / download_progress / download_finish` 日志，并在 SQLite 中先写入 `downloading` 状态。
+  - 预处理与标注改为联动流水线：accepted clip 进入待标注队列，达到阈值或超时后派发并行标注。
+  - 为 clips 增加创建时间、`annotating` 状态和队列年龄统计，便于做动态快照日志和批触发判断。
+  - 新增完整 profile `configs/profiles/continuous_vllm_pipeline.yaml`，并重写 README 的服务模式文档。
+
 ## Test Results
 
 | Test | Result |
@@ -57,6 +74,8 @@
 | `python3 -m compileall src/group_emotion_video` | passed |
 | `python3 -m pytest -q` | `6 passed` |
 | `python3 -m pytest -q` | `8 passed` |
+| `python3 -m pytest -q` | `9 passed` |
+| `python3 -m pytest -q tests/test_workflow.py` | passed |
 | 在线 smoke | `prepare-reference -> seed-queries -> crawl -> preprocess -> annotate -> export` | passed |
 
 ## Error Log
@@ -74,4 +93,6 @@
 - 实现已落地。
 - 离线测试已通过。
 - 首轮真实联网 smoke 已跑通。
+- `status` 已能直接作为 5 天产能估算入口。
+- 服务模式已支持双进程常驻运行和动态快照日志。
 - 下一步应扩大在线 smoke 样本数，并继续微调 query/search/filter 策略。

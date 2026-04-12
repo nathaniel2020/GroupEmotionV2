@@ -4,7 +4,9 @@ import json
 import math
 import shutil
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -229,6 +231,9 @@ class PreprocessingService:
                 file_path.unlink()
 
     def _process_video(self, video_record: dict[str, Any]) -> int:
+        preprocess_started_at = datetime.now().isoformat(timespec="seconds")
+        start_clock = time.perf_counter()
+        self.logger.info("preprocess_start video_uid=%s title=%s", video_record["video_uid"], video_record.get("title"))
         windows = self._build_windows(video_record)
         accepted_count = 0
         for window in windows:
@@ -319,16 +324,33 @@ class PreprocessingService:
             retention_status=retention_status,
             raw_video_path=None,
             accepted_clip_count=accepted_count,
+            preprocess_started_at=preprocess_started_at,
+            preprocess_finished_at=datetime.now().isoformat(timespec="seconds"),
+            preprocess_elapsed_sec=round(time.perf_counter() - start_clock, 3),
+        )
+        self.logger.info(
+            "preprocess_finish video_uid=%s accepted_clips=%s windows=%s",
+            video_record["video_uid"],
+            accepted_count,
+            len(windows),
         )
         return accepted_count
 
-    def preprocess(self, limit: int | None = None) -> int:
-        videos = self.video_repo.list_downloaded_for_preprocess(limit or int(self.config["preprocessing"]["max_videos_per_run"]))
+    def process_records(self, videos: list[dict[str, Any]]) -> int:
         if not videos:
             return 0
         accepted = 0
-        with ThreadPoolExecutor(max_workers=int(self.config["preprocessing"].get("workers", 2))) as executor:
-            futures = [executor.submit(self._process_video, video_record) for video_record in videos]
+        with ThreadPoolExecutor(max_workers=min(len(videos), int(self.config["preprocessing"].get("workers", 2)))) as executor:
+            futures = {executor.submit(self._process_video, video_record): video_record for video_record in videos}
             for future in as_completed(futures):
-                accepted += int(future.result())
+                video_record = futures[future]
+                try:
+                    accepted += int(future.result())
+                except Exception as exc:
+                    self.video_repo.reset_preprocess_claim(video_record["video_uid"])
+                    self.logger.exception("preprocess_failed video_uid=%s error=%s", video_record["video_uid"], exc)
         return accepted
+
+    def preprocess(self, limit: int | None = None) -> int:
+        videos = self.video_repo.list_downloaded_for_preprocess(limit or int(self.config["preprocessing"]["max_videos_per_run"]))
+        return self.process_records(videos)

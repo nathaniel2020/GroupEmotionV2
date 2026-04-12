@@ -202,6 +202,20 @@ def test_workflow_end_to_end_offline(tmp_path: Path) -> None:
             "max_images_per_prompt": 2,
             "parallel": {"enabled": True, "max_inflight_requests": 2, "acquire_timeout_sec": 30},
         },
+        "service": {
+            "download_loop": {"max_queries_per_cycle": 10, "poll_interval_sec": 0.01, "idle_sleep_sec": 0.01, "max_cycles": 0, "stop_when_idle": True},
+            "pipeline_loop": {
+                "preprocess_claim_limit": 1,
+                "annotation_trigger_size": 1,
+                "annotation_batch_size": 1,
+                "annotation_trigger_timeout_sec": 0,
+                "queue_max_clips": 8,
+                "poll_interval_sec": 0.01,
+                "idle_sleep_sec": 0.01,
+                "max_cycles": 0,
+                "stop_when_idle": True,
+            },
+        },
     }
 
     workflow = Workflow(config, adapter=FakeBilibiliAdapter(), annotator=FakeAnnotator())
@@ -210,6 +224,7 @@ def test_workflow_end_to_end_offline(tmp_path: Path) -> None:
     assert workflow.crawl() == 1
     assert workflow.preprocess() == 1
     assert workflow.annotate() == 1
+    status = workflow.status()
     export_dir = Path(workflow.export())
 
     assert export_dir.exists()
@@ -221,3 +236,109 @@ def test_workflow_end_to_end_offline(tmp_path: Path) -> None:
 
     annotation_domains_copy = export_dir / "metadata" / "annotation_domains.json"
     assert annotation_domains_copy.exists()
+
+    assert status["queries"] == {"total": 3, "pending": 0, "retry": 0, "done": 3}
+    assert status["videos"]["downloaded"] == 1
+    assert status["videos"]["pending_preprocess"] == 0
+    assert status["clips"]["total"] == 1
+    assert status["clips"]["pending_annotation"] == 0
+    assert status["annotations"] == {"done": 1, "rejected": 0, "failed": 0, "completed": 1}
+    assert status["average_durations_sec"]["download_per_downloaded_video"] is not None
+    assert status["average_durations_sec"]["preprocess_per_processed_video"] is not None
+    assert status["average_durations_sec"]["preprocess_per_accepted_clip"] is not None
+    assert status["average_durations_sec"]["annotate_per_completed_clip"] is not None
+    assert status["average_durations_sec"]["annotate_per_done_clip"] is not None
+    assert status["projection_5d"]["workers"] == {"download": 2, "preprocess": 1, "annotate": 2}
+    assert status["projection_5d"]["yield_assumptions"]["accepted_clips_per_processed_video"] == 1.0
+    assert status["projection_5d"]["yield_assumptions"]["done_rate_after_annotation"] == 1.0
+
+
+def test_service_loops_process_download_and_pipeline(tmp_path: Path) -> None:
+    excel_path = tmp_path / "原子情感因素.xlsx"
+    schema_path = tmp_path / "schema.json"
+    label_seed_path = tmp_path / "labels.json"
+    _write_seed_excel(excel_path)
+    _write_schema_json(schema_path)
+    label_seed_path.write_text(json.dumps({"labels": ["Joy", "Anxiety"]}, ensure_ascii=False), encoding="utf-8")
+
+    config = {
+        "project": {
+            "name": "test_project",
+            "root_dir": str(tmp_path),
+            "data_dir": "data",
+            "runtime_dir": "runtime",
+            "reference_dir": "data/reference",
+            "query_seed_catalog_path": "data/reference/query_seed_catalog.json",
+            "annotation_domains_path": "data/reference/annotation_domains.json",
+            "query_seed_excel_path": str(excel_path),
+            "query_seed_sheet_name": "情感因素",
+            "annotation_schema_source_path": str(schema_path),
+            "group_emotion_label_seed_path": str(label_seed_path),
+        },
+        "sources": {
+            "default": "bilibili",
+            "bilibili": {"enabled": True, "max_pages_per_query": 1, "max_items_per_query": 3},
+        },
+        "crawl": {
+            "max_queries_per_run": 10,
+            "min_duration_sec": 15,
+            "max_duration_sec": 1200,
+            "max_video_size_mb": 300,
+            "enrich_workers": 1,
+            "max_items_per_query": 3,
+            "download": {"enabled": True, "workers": 1, "max_inflight_per_host": 1, "retries": 1, "fragment_retries": 1, "socket_timeout_sec": 10},
+        },
+        "preprocessing": {
+            "max_videos_per_run": 5,
+            "workers": 1,
+            "prefer_subtitles": True,
+            "fixed_window_sec": 12,
+            "overlap_sec": 2,
+            "subtitle_target_min_sec": 8,
+            "subtitle_target_max_sec": 15,
+            "min_clip_duration_sec": 4,
+            "max_clip_duration_sec": 20,
+            "clip_export_mode": "copy",
+            "keyframe_count": 2,
+            "use_llm_filter": False,
+            "duplicate_overlap_threshold": 0.8,
+        },
+        "annotation": {"max_clips_per_run": 10, "clip_workers": 2, "min_overall_confidence": 0.6, "export_requires_review_clear": False},
+        "llm": {
+            "enabled": False,
+            "base_url": "https://yunwu.ai/v1/",
+            "api_key_env": "YUNWU_API_KEY",
+            "model": "gemini-3.1-pro-preview",
+            "timeout_sec": 30,
+            "temperature": 0.1,
+            "max_images_per_prompt": 2,
+            "parallel": {"enabled": True, "max_inflight_requests": 2, "acquire_timeout_sec": 30},
+        },
+        "service": {
+            "download_loop": {"max_queries_per_cycle": 10, "poll_interval_sec": 0.01, "idle_sleep_sec": 0.01, "max_cycles": 0, "stop_when_idle": True},
+            "pipeline_loop": {
+                "preprocess_claim_limit": 1,
+                "annotation_trigger_size": 1,
+                "annotation_batch_size": 1,
+                "annotation_trigger_timeout_sec": 0,
+                "queue_max_clips": 8,
+                "poll_interval_sec": 0.01,
+                "idle_sleep_sec": 0.01,
+                "max_cycles": 0,
+                "stop_when_idle": True,
+            },
+        },
+    }
+
+    workflow = Workflow(config, adapter=FakeBilibiliAdapter(), annotator=FakeAnnotator())
+    workflow.prepare_reference()
+    workflow.seed_queries()
+    download_status = workflow.download_loop()
+    pipeline_status = workflow.pipeline_loop()
+
+    assert download_status["videos"]["downloaded"] == 1
+    assert pipeline_status["videos"]["processed"] == 1
+    assert pipeline_status["clips"]["accepted"] == 1
+    assert pipeline_status["clips"]["pending_annotation"] == 0
+    assert pipeline_status["clips"]["annotating"] == 0
+    assert pipeline_status["annotations"]["done"] == 1

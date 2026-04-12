@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -84,21 +86,36 @@ class AnnotationService:
         self.layout = layout
         self.logger = logger
 
-    def _annotate_clip(self, clip_record: dict[str, Any]) -> bool:
+    def annotate_clip_record(self, clip_record: dict[str, Any]) -> bool:
         annotation_uid = make_annotation_uid(clip_record["clip_uid"])
+        started_at = datetime.now().isoformat(timespec="seconds")
+        start_clock = time.perf_counter()
+        self.logger.info("annotation_start clip_uid=%s", clip_record["clip_uid"])
         try:
             agent_outputs, final_annotation, field_confidence, quality_flags, status, review_required = self.annotator.annotate(clip_record)
         except Exception as exc:
+            finished_at = datetime.now().isoformat(timespec="seconds")
+            elapsed_sec = round(time.perf_counter() - start_clock, 3)
             self.clip_repo.update_annotation_status(clip_record["clip_uid"], "failed")
             artifact_path = self.layout["artifact_annotations"] / f"{annotation_uid}.failed.json"
             artifact_path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {"annotation_uid": annotation_uid, "clip_uid": clip_record["clip_uid"], "error": str(exc)}
+            payload = {
+                "annotation_uid": annotation_uid,
+                "clip_uid": clip_record["clip_uid"],
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "elapsed_sec": elapsed_sec,
+                "error": str(exc),
+            }
             artifact_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             self.annotation_repo.upsert(
                 {
                     "annotation_uid": annotation_uid,
                     "clip_uid": clip_record["clip_uid"],
                     "status": "failed",
+                    "started_at": started_at,
+                    "finished_at": finished_at,
+                    "elapsed_sec": elapsed_sec,
                     "review_required": False,
                     "final_annotation": {},
                     "field_confidence": {},
@@ -106,13 +123,19 @@ class AnnotationService:
                     "artifact_path": str(artifact_path),
                 }
             )
+            self.logger.exception("annotation_failed clip_uid=%s error=%s", clip_record["clip_uid"], exc)
             return False
 
+        finished_at = datetime.now().isoformat(timespec="seconds")
+        elapsed_sec = round(time.perf_counter() - start_clock, 3)
         artifact_path = self.layout["artifact_annotations"] / f"{annotation_uid}.json"
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "annotation_uid": annotation_uid,
             "clip_uid": clip_record["clip_uid"],
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "elapsed_sec": elapsed_sec,
             "agent_outputs": agent_outputs,
             "final_annotation": final_annotation,
             "field_confidence": field_confidence,
@@ -126,6 +149,9 @@ class AnnotationService:
                 "annotation_uid": annotation_uid,
                 "clip_uid": clip_record["clip_uid"],
                 "status": status,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "elapsed_sec": elapsed_sec,
                 "review_required": review_required,
                 "final_annotation": final_annotation,
                 "field_confidence": field_confidence,
@@ -134,6 +160,7 @@ class AnnotationService:
             }
         )
         self.clip_repo.update_annotation_status(clip_record["clip_uid"], status)
+        self.logger.info("annotation_finish clip_uid=%s status=%s elapsed_sec=%.3f", clip_record["clip_uid"], status, elapsed_sec)
         return status in {"done", "rejected"}
 
     def annotate(self, clips: list[dict[str, Any]]) -> int:
@@ -141,7 +168,7 @@ class AnnotationService:
             return 0
         completed = 0
         with ThreadPoolExecutor(max_workers=min(len(clips), int(self.config["annotation"].get("clip_workers", 4)))) as executor:
-            futures = [executor.submit(self._annotate_clip, clip_record) for clip_record in clips]
+            futures = [executor.submit(self.annotate_clip_record, clip_record) for clip_record in clips]
             for future in as_completed(futures):
                 completed += int(bool(future.result()))
         return completed

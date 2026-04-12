@@ -4,7 +4,7 @@
 实现一条轻量但完整的 `query -> B站采集 -> 并行下载 -> 切分/过滤 -> 并行 LLM 标注 -> 导出` 流水线，并将外部参考数据冻结为本地 JSON。
 
 ## Current Phase
-Phase 5
+Phase 8
 
 ## Phases
 
@@ -38,6 +38,18 @@ Phase 5
 - [x] 更新 README、实现文档和进度文件
 - **Status:** complete
 
+### Phase 7: Status Metrics & Throughput Estimation
+- [x] 为下载 / 预处理 / 标注补充时延落库字段
+- [x] 扩展 `status` 输出视频、clip、标注和平均耗时统计
+- [x] 基于当前均值和 worker 配置增加 5 天产能估算
+- **Status:** complete
+
+### Phase 8: Continuous Service Mode
+- [x] 新增 `download-loop` 独立常驻下载命令
+- [x] 新增 `pipeline-loop` 预处理/标注联动流水线
+- [x] 补充完整常驻运行 profile 与 README
+- **Status:** complete
+
 ## Key Decisions
 | Decision | Rationale |
 |----------|-----------|
@@ -52,3 +64,5 @@ Phase 5
 - 在真实 Yunwu/Gemini 配置上继续做多样本联网冒烟
 - 根据首轮数据分布微调 `group_emotion` label catalog 与过滤阈值
 - 清理或归档 smoke 运行中的失败工件历史
+- 让真实在线运行积累更多耗时样本，提升 5 天产能估算的稳定性
+- 在真实 VLLM 环境下验证 `annotation_trigger_size=100` 的批触发吞吐与延迟权衡

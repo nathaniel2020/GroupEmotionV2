@@ -1,20 +1,12 @@
 project:
-  name: group_emotion_video
-  root_dir: .
-  data_dir: data
-  runtime_dir: runtime
-  reference_dir: data/reference
-  query_seed_catalog_path: data/reference/query_seed_catalog.json
-  annotation_domains_path: data/reference/annotation_domains.json
-  query_seed_excel_path: /Users/aidan/Home/KnowledgeBase/000-Projects/010-019论文项目/013-群体情感/013.04 中期检查/交付材料/原子情感因素.xlsx
-  query_seed_sheet_name: 情感因素
-  annotation_schema_source_path: /Users/aidan/Home/Code/010-019论文项目/013-群体情感/013.01 video/doc/标注字段.xlsx
-  group_emotion_label_seed_path: configs/group_emotion_labels.seed.json
+  data_dir: runtime/continuous_pipeline/data
+  runtime_dir: runtime/continuous_pipeline
+  reference_dir: runtime/continuous_pipeline/reference
+  query_seed_catalog_path: runtime/continuous_pipeline/reference/query_seed_catalog.json
+  annotation_domains_path: runtime/continuous_pipeline/reference/annotation_domains.json
 
 sources:
-  default: bilibili
   bilibili:
-    enabled: true
     max_pages_per_query: 2
     max_items_per_query: 5
     search_timeout_sec: 20
@@ -29,14 +21,14 @@ crawl:
   max_items_per_query: 5
   download:
     enabled: true
-    workers: 4
+    workers: 2
     max_inflight_per_host: 2
     retries: 8
     fragment_retries: 8
     socket_timeout_sec: 30
 
 preprocessing:
-  max_videos_per_run: 10
+  max_videos_per_run: 20
   workers: 2
   prefer_subtitles: true
   fixed_window_sec: 12
@@ -51,22 +43,22 @@ preprocessing:
   duplicate_overlap_threshold: 0.8
 
 annotation:
-  max_clips_per_run: 10
-  clip_workers: 4
+  max_clips_per_run: 128
+  clip_workers: 8
   min_overall_confidence: 0.6
   export_requires_review_clear: false
 
 llm:
-  enabled: false
-  base_url: https://yunwu.ai/v1/
-  api_key_env: YUNWU_API_KEY
-  model: gemini-3.1-pro-preview
+  enabled: true
+  base_url: http://127.0.0.1:8000/v1
+  api_key_env: OPENAI_API_KEY
+  model: Qwen/Qwen2.5-VL-7B-Instruct
   timeout_sec: 180
   temperature: 0.1
   max_images_per_prompt: 4
   parallel:
     enabled: true
-    max_inflight_requests: 2
+    max_inflight_requests: 8
     acquire_timeout_sec: 300
 
 service:
@@ -80,10 +72,10 @@ service:
 
   pipeline_loop:
     preprocess_claim_limit: 2
-    annotation_trigger_size: 16
-    annotation_batch_size: 4
+    annotation_trigger_size: 100
+    annotation_batch_size: 8
     annotation_trigger_timeout_sec: 30
-    queue_max_clips: 128
+    queue_max_clips: 400
     poll_interval_sec: 2
     idle_sleep_sec: 5
     max_cycles: 0

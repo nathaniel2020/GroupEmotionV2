@@ -11,7 +11,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", action="append", dest="config_paths", default=[])
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    for name in ("prepare-reference", "seed-queries", "crawl", "preprocess", "annotate", "export", "status"):
+    for name in ("prepare-reference", "seed-queries", "crawl", "preprocess", "annotate", "download-loop", "pipeline-loop", "export", "status"):
         subparsers.add_parser(name)
 
     run_parser = subparsers.add_parser("run")
@@ -34,6 +34,10 @@ def main(argv: list[str] | None = None) -> int:
         result = workflow.preprocess()
     elif args.command == "annotate":
         result = workflow.annotate()
+    elif args.command == "download-loop":
+        result = workflow.download_loop()
+    elif args.command == "pipeline-loop":
+        result = workflow.pipeline_loop()
     elif args.command == "export":
         result = workflow.export()
     elif args.command == "status":

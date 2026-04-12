@@ -60,6 +60,16 @@ class QueryRepository:
         row = self.db.fetchone("SELECT COUNT(*) AS count FROM queries")
         return int(row["count"]) if row else 0
 
+    def summary(self) -> dict[str, int]:
+        rows = self.db.fetchall("SELECT status, COUNT(*) AS count FROM queries GROUP BY status")
+        summary = {"total": 0, "pending": 0, "retry": 0, "done": 0}
+        for row in rows:
+            status = str(row["status"])
+            count = int(row["count"])
+            summary["total"] += count
+            summary[status] = count
+        return summary
+
 
 class VideoRepository:
     def __init__(self, db: SQLiteDB):
@@ -75,10 +85,11 @@ class VideoRepository:
             INSERT INTO videos (
               video_uid, platform, bvid, url, title, uploader, publish_time, duration_sec, cover_url, description,
               tags_json, categories_json, view_count, like_count, comment_count, play_count, danmaku_count, type,
-              webpage_url, query_id, scene_text, trigger_text, source_excel_row, subtitles_available, rights_status,
-              download_status, reject_reason, retention_status, accepted_clip_count, raw_video_path, video_meta_path,
+              webpage_url, query_id, scene_text, trigger_text, source_excel_row, subtitles_available, rights_status, download_status,
+              download_started_at, download_finished_at, download_elapsed_sec, reject_reason, retention_status, accepted_clip_count,
+              preprocess_started_at, preprocess_finished_at, preprocess_elapsed_sec, raw_video_path, video_meta_path,
               platform_metadata_json, extra_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(video_uid) DO UPDATE SET
               platform=excluded.platform,
               bvid=excluded.bvid,
@@ -105,9 +116,15 @@ class VideoRepository:
               subtitles_available=excluded.subtitles_available,
               rights_status=excluded.rights_status,
               download_status=excluded.download_status,
+              download_started_at=excluded.download_started_at,
+              download_finished_at=excluded.download_finished_at,
+              download_elapsed_sec=excluded.download_elapsed_sec,
               reject_reason=excluded.reject_reason,
               retention_status=excluded.retention_status,
               accepted_clip_count=excluded.accepted_clip_count,
+              preprocess_started_at=excluded.preprocess_started_at,
+              preprocess_finished_at=excluded.preprocess_finished_at,
+              preprocess_elapsed_sec=excluded.preprocess_elapsed_sec,
               raw_video_path=excluded.raw_video_path,
               video_meta_path=excluded.video_meta_path,
               platform_metadata_json=excluded.platform_metadata_json,
@@ -140,9 +157,15 @@ class VideoRepository:
                 int(bool(record.get("subtitles_available"))),
                 record.get("rights_status", "unknown"),
                 record["download_status"],
+                record.get("download_started_at"),
+                record.get("download_finished_at"),
+                record.get("download_elapsed_sec"),
                 record.get("reject_reason"),
                 record.get("retention_status"),
                 int(record.get("accepted_clip_count", 0)),
+                record.get("preprocess_started_at"),
+                record.get("preprocess_finished_at"),
+                record.get("preprocess_elapsed_sec"),
                 record.get("raw_video_path"),
                 record.get("video_meta_path"),
                 self.db.to_json(record.get("platform_metadata", {})),
@@ -171,7 +194,11 @@ class VideoRepository:
         rows = self.db.fetchall(
             """
             SELECT * FROM videos
-            WHERE download_status='downloaded' AND raw_video_path IS NOT NULL AND COALESCE(retention_status, '')=''
+            WHERE download_status='downloaded'
+              AND raw_video_path IS NOT NULL
+              AND COALESCE(retention_status, '')=''
+              AND preprocess_started_at IS NULL
+              AND preprocess_finished_at IS NULL
             ORDER BY source_excel_row, title
             LIMIT ?
             """,
@@ -179,17 +206,51 @@ class VideoRepository:
         )
         return [self._deserialize(row) for row in rows]
 
+    def claim_downloaded_for_preprocess(self, limit: int) -> list[dict[str, Any]]:
+        rows = self.list_downloaded_for_preprocess(limit)
+        if not rows:
+            return []
+        started_at = datetime.now().isoformat(timespec="seconds")
+        for row in rows:
+            self.mark_preprocess_started(row["video_uid"], started_at=started_at)
+            row["preprocess_started_at"] = started_at
+        return rows
+
     def list_processed_clips_for_annotation(self, limit: int) -> list[dict[str, Any]]:
         rows = self.db.fetchall(
             """
             SELECT * FROM clips
             WHERE filter_status='accepted' AND annotation_status='pending'
-            ORDER BY clip_uid
+            ORDER BY COALESCE(created_at, ''), clip_uid
             LIMIT ?
             """,
             (int(limit),),
         )
         return [self._deserialize_clip(row) for row in rows]
+
+    def mark_preprocess_started(self, video_uid: str, *, started_at: str | None = None) -> None:
+        self.db.execute(
+            """
+            UPDATE videos
+            SET preprocess_started_at=?,
+                preprocess_finished_at=NULL,
+                preprocess_elapsed_sec=NULL
+            WHERE video_uid=?
+            """,
+            (started_at or datetime.now().isoformat(timespec="seconds"), video_uid),
+        )
+
+    def reset_preprocess_claim(self, video_uid: str) -> None:
+        self.db.execute(
+            """
+            UPDATE videos
+            SET preprocess_started_at=NULL,
+                preprocess_finished_at=NULL,
+                preprocess_elapsed_sec=NULL
+            WHERE video_uid=?
+            """,
+            (video_uid,),
+        )
 
     def list_exportable(self) -> list[dict[str, Any]]:
         rows = self.db.fetchall(
@@ -204,11 +265,78 @@ class VideoRepository:
         )
         return [dict(row) for row in rows]
 
-    def update_video_cleanup(self, video_uid: str, *, retention_status: str, raw_video_path: str | None, accepted_clip_count: int) -> None:
+    def update_video_cleanup(
+        self,
+        video_uid: str,
+        *,
+        retention_status: str,
+        raw_video_path: str | None,
+        accepted_clip_count: int,
+        preprocess_started_at: str | None = None,
+        preprocess_finished_at: str | None = None,
+        preprocess_elapsed_sec: float | None = None,
+    ) -> None:
         self.db.execute(
-            "UPDATE videos SET retention_status=?, raw_video_path=?, accepted_clip_count=? WHERE video_uid=?",
-            (retention_status, raw_video_path, int(accepted_clip_count), video_uid),
+            """
+            UPDATE videos
+            SET retention_status=?,
+                raw_video_path=?,
+                accepted_clip_count=?,
+                preprocess_started_at=COALESCE(?, preprocess_started_at),
+                preprocess_finished_at=COALESCE(?, preprocess_finished_at),
+                preprocess_elapsed_sec=COALESCE(?, preprocess_elapsed_sec)
+            WHERE video_uid=?
+            """,
+            (
+                retention_status,
+                raw_video_path,
+                int(accepted_clip_count),
+                preprocess_started_at,
+                preprocess_finished_at,
+                preprocess_elapsed_sec,
+                video_uid,
+            ),
         )
+
+    def summary(self) -> dict[str, Any]:
+        row = self.db.fetchone(
+            """
+            SELECT
+              COUNT(*) AS total_videos,
+              SUM(CASE WHEN download_status='downloaded' THEN 1 ELSE 0 END) AS downloaded_videos,
+              SUM(CASE WHEN download_status='downloaded' AND download_started_at IS NOT NULL AND download_finished_at IS NULL THEN 1 ELSE 0 END) AS downloading_videos,
+              SUM(CASE WHEN download_status='downloaded' AND raw_video_path IS NOT NULL AND COALESCE(retention_status, '')='' AND preprocess_started_at IS NULL AND preprocess_finished_at IS NULL THEN 1 ELSE 0 END) AS pending_preprocess_videos,
+              SUM(CASE WHEN preprocess_started_at IS NOT NULL AND preprocess_finished_at IS NULL THEN 1 ELSE 0 END) AS preprocessing_videos,
+              SUM(CASE WHEN preprocess_finished_at IS NOT NULL THEN 1 ELSE 0 END) AS processed_videos,
+              COALESCE(SUM(CASE WHEN preprocess_finished_at IS NOT NULL THEN accepted_clip_count ELSE 0 END), 0) AS accepted_clips_after_preprocess,
+              AVG(CASE WHEN download_status='downloaded' AND download_elapsed_sec IS NOT NULL THEN download_elapsed_sec END) AS avg_download_sec,
+              AVG(CASE WHEN preprocess_finished_at IS NOT NULL AND preprocess_elapsed_sec IS NOT NULL THEN preprocess_elapsed_sec END) AS avg_preprocess_sec_per_video,
+              CASE
+                WHEN COALESCE(SUM(CASE WHEN preprocess_finished_at IS NOT NULL THEN accepted_clip_count ELSE 0 END), 0) > 0
+                THEN SUM(CASE WHEN preprocess_finished_at IS NOT NULL AND preprocess_elapsed_sec IS NOT NULL THEN preprocess_elapsed_sec ELSE 0 END)
+                     / SUM(CASE WHEN preprocess_finished_at IS NOT NULL THEN accepted_clip_count ELSE 0 END)
+              END AS avg_preprocess_sec_per_accepted_clip
+            FROM videos
+            """
+        )
+        processed_videos = int(row["processed_videos"] or 0) if row else 0
+        accepted_clips_after_preprocess = int(row["accepted_clips_after_preprocess"] or 0) if row else 0
+        accepted_clips_per_processed_video = None
+        if processed_videos > 0:
+            accepted_clips_per_processed_video = accepted_clips_after_preprocess / processed_videos
+        return {
+            "total": int(row["total_videos"] or 0) if row else 0,
+            "downloaded": int(row["downloaded_videos"] or 0) if row else 0,
+            "downloading": int(row["downloading_videos"] or 0) if row else 0,
+            "pending_preprocess": int(row["pending_preprocess_videos"] or 0) if row else 0,
+            "preprocessing": int(row["preprocessing_videos"] or 0) if row else 0,
+            "processed": processed_videos,
+            "accepted_clips_after_preprocess": accepted_clips_after_preprocess,
+            "avg_download_sec": _nullable_float(row["avg_download_sec"] if row else None),
+            "avg_preprocess_sec_per_video": _nullable_float(row["avg_preprocess_sec_per_video"] if row else None),
+            "avg_preprocess_sec_per_accepted_clip": _nullable_float(row["avg_preprocess_sec_per_accepted_clip"] if row else None),
+            "accepted_clips_per_processed_video": _nullable_float(accepted_clips_per_processed_video),
+        }
 
     def _deserialize(self, row: Any) -> dict[str, Any]:
         result = dict(row)
@@ -234,15 +362,16 @@ class ClipRepository:
         self.db.execute(
             """
             INSERT INTO clips (
-              clip_uid, video_uid, start_sec, end_sec, duration_sec, segmentation_mode, filter_status,
+              clip_uid, video_uid, start_sec, end_sec, duration_sec, created_at, segmentation_mode, filter_status,
               filter_reasons_json, retention_status, clip_path, manifest_path, keyframes_manifest_path,
               subtitle_path, scores_json, annotation_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(clip_uid) DO UPDATE SET
               video_uid=excluded.video_uid,
               start_sec=excluded.start_sec,
               end_sec=excluded.end_sec,
               duration_sec=excluded.duration_sec,
+              created_at=COALESCE(clips.created_at, excluded.created_at),
               segmentation_mode=excluded.segmentation_mode,
               filter_status=excluded.filter_status,
               filter_reasons_json=excluded.filter_reasons_json,
@@ -260,6 +389,7 @@ class ClipRepository:
                 float(record["start_sec"]),
                 float(record["end_sec"]),
                 float(record["duration_sec"]),
+                record.get("created_at") or datetime.now().isoformat(timespec="seconds"),
                 record["segmentation_mode"],
                 record["filter_status"],
                 self.db.to_json(record.get("filter_reasons", [])),
@@ -276,6 +406,54 @@ class ClipRepository:
     def update_annotation_status(self, clip_uid: str, status: str) -> None:
         self.db.execute("UPDATE clips SET annotation_status=? WHERE clip_uid=?", (status, clip_uid))
 
+    def claim_pending_annotations(self, limit: int) -> list[dict[str, Any]]:
+        rows = self.db.fetchall(
+            """
+            SELECT * FROM clips
+            WHERE filter_status='accepted' AND annotation_status='pending'
+            ORDER BY COALESCE(created_at, ''), clip_uid
+            LIMIT ?
+            """,
+            (int(limit),),
+        )
+        if not rows:
+            return []
+        clip_uids = [str(row["clip_uid"]) for row in rows]
+        self.db.executemany(
+            "UPDATE clips SET annotation_status='annotating' WHERE clip_uid=?",
+            [(clip_uid,) for clip_uid in clip_uids],
+        )
+        return [self._deserialize(row) for row in rows]
+
+    def summary(self) -> dict[str, Any]:
+        row = self.db.fetchone(
+            """
+            SELECT
+              COUNT(*) AS total_clips,
+              SUM(CASE WHEN filter_status='accepted' THEN 1 ELSE 0 END) AS accepted_clips,
+              SUM(CASE WHEN filter_status='rejected' THEN 1 ELSE 0 END) AS rejected_clips,
+              SUM(CASE WHEN annotation_status='pending' THEN 1 ELSE 0 END) AS pending_annotation_clips,
+              SUM(CASE WHEN annotation_status='annotating' THEN 1 ELSE 0 END) AS annotating_clips,
+              MIN(CASE WHEN annotation_status='pending' THEN created_at END) AS oldest_pending_created_at
+            FROM clips
+            """
+        )
+        oldest_pending_created_at = str(row["oldest_pending_created_at"]) if row and row["oldest_pending_created_at"] else None
+        return {
+            "total": int(row["total_clips"] or 0) if row else 0,
+            "accepted": int(row["accepted_clips"] or 0) if row else 0,
+            "rejected": int(row["rejected_clips"] or 0) if row else 0,
+            "pending_annotation": int(row["pending_annotation_clips"] or 0) if row else 0,
+            "annotating": int(row["annotating_clips"] or 0) if row else 0,
+            "oldest_pending_created_at": oldest_pending_created_at,
+        }
+
+    def _deserialize(self, row: Any) -> dict[str, Any]:
+        result = dict(row)
+        result["filter_reasons"] = self.db.from_json(result.pop("filter_reasons_json"), [])
+        result["scores"] = self.db.from_json(result.pop("scores_json"), {})
+        return result
+
 
 class AnnotationRepository:
     def __init__(self, db: SQLiteDB):
@@ -285,12 +463,15 @@ class AnnotationRepository:
         self.db.execute(
             """
             INSERT INTO annotations (
-              annotation_uid, clip_uid, status, review_required, final_annotation_json,
+              annotation_uid, clip_uid, status, started_at, finished_at, elapsed_sec, review_required, final_annotation_json,
               field_confidence_json, quality_flags_json, artifact_path
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(annotation_uid) DO UPDATE SET
               clip_uid=excluded.clip_uid,
               status=excluded.status,
+              started_at=excluded.started_at,
+              finished_at=excluded.finished_at,
+              elapsed_sec=excluded.elapsed_sec,
               review_required=excluded.review_required,
               final_annotation_json=excluded.final_annotation_json,
               field_confidence_json=excluded.field_confidence_json,
@@ -301,6 +482,9 @@ class AnnotationRepository:
                 record["annotation_uid"],
                 record["clip_uid"],
                 record["status"],
+                record.get("started_at"),
+                record.get("finished_at"),
+                record.get("elapsed_sec"),
                 int(bool(record.get("review_required"))),
                 self.db.to_json(record.get("final_annotation", {})),
                 self.db.to_json(record.get("field_confidence", {})),
@@ -309,9 +493,33 @@ class AnnotationRepository:
             ),
         )
 
-    def summary(self) -> dict[str, int]:
+    def summary(self) -> dict[str, Any]:
         rows = self.db.fetchall("SELECT status, COUNT(*) AS count FROM annotations GROUP BY status")
         summary = {"done": 0, "rejected": 0, "failed": 0}
         for row in rows:
             summary[str(row["status"])] = int(row["count"])
-        return summary
+        timing_row = self.db.fetchone(
+            """
+            SELECT
+              AVG(CASE WHEN elapsed_sec IS NOT NULL THEN elapsed_sec END) AS avg_completed_sec,
+              AVG(CASE WHEN status='done' AND elapsed_sec IS NOT NULL THEN elapsed_sec END) AS avg_done_sec
+            FROM annotations
+            """
+        )
+        completed = sum(summary.values())
+        done_rate = None
+        if completed > 0:
+            done_rate = summary["done"] / completed
+        return {
+            **summary,
+            "completed": completed,
+            "avg_completed_sec": _nullable_float(timing_row["avg_completed_sec"] if timing_row else None),
+            "avg_done_sec": _nullable_float(timing_row["avg_done_sec"] if timing_row else None),
+            "done_rate": _nullable_float(done_rate),
+        }
+
+
+def _nullable_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    return round(float(value), 3)
