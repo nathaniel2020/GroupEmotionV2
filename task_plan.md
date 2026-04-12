@@ -80,3 +80,4 @@ Phase 10
 - 在真实 VLLM 环境下验证 `annotation_trigger_size=100` 的批触发吞吐与延迟权衡
 - 根据真实数据分布调优 `query_recycle_cooldown_sec` 和 `max_runs_per_query`
 - 基于真实 reject reason 分布调优 query 生成策略和 L2 过滤强度
+- 基于 `status["annotations"]["top_quality_flags"]` 调整 schema 提示词或 `group_emotion` 标签池，解决 accepted clip 全部 `failed` 的问题

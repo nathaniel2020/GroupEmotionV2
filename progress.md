@@ -121,3 +121,7 @@
   - 为 `status["clips"]` 增加 `top_rejection_reasons`，让线上运行能直接看到 rejection 分布。
   - 执行 `python3 -m pytest -q tests/test_acquisition.py tests/test_preprocessing.py`。
   - 执行 `python3 -m pytest -q`，`21 passed`。
+  - 基于线上 `weak_emotion_signal` 主导的 reject 分布，继续扩展 `GROUP_HINTS` / `EMOTION_HINTS`，补入更贴近教育/校园/比赛/冲突场景的中文和英文事件词。
+  - 为 `status["annotations"]` 增加 `top_quality_flags`，便于定位 accepted clip 为什么全部进入 `failed` 而不是 `done/rejected`。
+  - 执行 `python3 -m pytest -q tests/test_preprocessing.py tests/test_workflow.py`。
+  - 执行 `python3 -m pytest -q`，`22 passed`。

@@ -595,6 +595,17 @@ class AnnotationRepository:
         summary = {"done": 0, "rejected": 0, "failed": 0}
         for row in rows:
             summary[str(row["status"])] = int(row["count"])
+        quality_flag_counts: dict[str, int] = {}
+        for annotation_row in self.db.fetchall("SELECT quality_flags_json FROM annotations"):
+            for flag in self.db.from_json(annotation_row["quality_flags_json"], []):
+                normalized = str(flag).strip()
+                if not normalized:
+                    continue
+                quality_flag_counts[normalized] = quality_flag_counts.get(normalized, 0) + 1
+        top_quality_flags = [
+            {"flag": flag, "count": count}
+            for flag, count in sorted(quality_flag_counts.items(), key=lambda item: (-item[1], item[0]))[:5]
+        ]
         timing_row = self.db.fetchone(
             """
             SELECT
@@ -613,6 +624,7 @@ class AnnotationRepository:
             "avg_completed_sec": _nullable_float(timing_row["avg_completed_sec"] if timing_row else None),
             "avg_done_sec": _nullable_float(timing_row["avg_done_sec"] if timing_row else None),
             "done_rate": _nullable_float(done_rate),
+            "top_quality_flags": top_quality_flags,
         }
 
 

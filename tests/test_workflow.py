@@ -273,7 +273,7 @@ def test_workflow_end_to_end_offline(tmp_path: Path) -> None:
     assert status["videos"]["pending_preprocess"] == 0
     assert status["clips"]["total"] == 1
     assert status["clips"]["pending_annotation"] == 0
-    assert status["annotations"] == {"done": 1, "rejected": 0, "failed": 0, "completed": 1}
+    assert status["annotations"] == {"done": 1, "rejected": 0, "failed": 0, "completed": 1, "top_quality_flags": []}
     assert status["average_durations_sec"]["download_per_downloaded_video"] is not None
     assert status["average_durations_sec"]["preprocess_per_processed_video"] is not None
     assert status["average_durations_sec"]["preprocess_per_accepted_clip"] is not None

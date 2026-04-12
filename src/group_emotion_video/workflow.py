@@ -247,6 +247,7 @@ class Workflow:
                 "rejected": annotation_summary["rejected"],
                 "failed": annotation_summary["failed"],
                 "completed": annotation_summary["completed"],
+                "top_quality_flags": annotation_summary.get("top_quality_flags", []),
             },
             "average_durations_sec": average_durations_sec,
             "projection_5d": self._build_five_day_projection(video_summary, annotation_summary),

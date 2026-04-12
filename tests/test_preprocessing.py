@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 
 from group_emotion_video.preprocessing import PreprocessingService
-from group_emotion_video.repositories import ClipRepository
+from group_emotion_video.repositories import AnnotationRepository, ClipRepository
 from group_emotion_video.sqlite_db import SQLiteDB, initialize_schema
 
 
@@ -50,7 +50,7 @@ def test_l2_filter_uses_metadata_when_subtitles_are_dialogue_only(tmp_path: Path
         "end_sec": 10.0,
         "segmentation_mode": "subtitle",
         "transcript_segments": [
-            {"segment_id": "seg1", "start": 0.0, "end": 5.0, "text": "老师说今天公布结果"},
+            {"segment_id": "seg1", "start": 0.0, "end": 5.0, "text": "今天公布结果"},
             {"segment_id": "seg2", "start": 5.0, "end": 10.0, "text": "请先回到座位"},
         ],
     }
@@ -114,4 +114,48 @@ def test_clip_summary_reports_top_rejection_reasons(tmp_path: Path) -> None:
     assert summary["top_rejection_reasons"] == [
         {"reason": "weak_group_signal", "count": 2},
         {"reason": "weak_emotion_signal", "count": 1},
+    ]
+
+
+def test_annotation_summary_reports_top_quality_flags(tmp_path: Path) -> None:
+    db = SQLiteDB(tmp_path / "runtime" / "index.sqlite")
+    initialize_schema(db)
+    repo = AnnotationRepository(db)
+    repo.upsert(
+        {
+            "annotation_uid": "ann_a",
+            "clip_uid": "clip_a",
+            "status": "failed",
+            "started_at": None,
+            "finished_at": None,
+            "elapsed_sec": 1.0,
+            "review_required": False,
+            "final_annotation": {},
+            "field_confidence": {},
+            "quality_flags": ["schema_invalid_enum", "low_confidence"],
+            "artifact_path": None,
+        }
+    )
+    repo.upsert(
+        {
+            "annotation_uid": "ann_b",
+            "clip_uid": "clip_b",
+            "status": "failed",
+            "started_at": None,
+            "finished_at": None,
+            "elapsed_sec": 2.0,
+            "review_required": False,
+            "final_annotation": {},
+            "field_confidence": {},
+            "quality_flags": ["schema_invalid_enum"],
+            "artifact_path": None,
+        }
+    )
+
+    summary = repo.summary()
+
+    assert summary["failed"] == 2
+    assert summary["top_quality_flags"] == [
+        {"flag": "schema_invalid_enum", "count": 2},
+        {"flag": "low_confidence", "count": 1},
     ]
