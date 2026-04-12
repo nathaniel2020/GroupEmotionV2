@@ -40,6 +40,8 @@ pip install -e .
 
 烟雾测试 profile 在 [configs/profiles/gemini_yunwu_smoke.yaml](configs/profiles/gemini_yunwu_smoke.yaml)。
 
+隔离在线 smoke profile 在 [configs/profiles/online_smoke.yaml](configs/profiles/online_smoke.yaml)。
+
 ## 运行
 
 先准备 reference：
@@ -88,8 +90,14 @@ python scripts/run_pipeline.py --config configs/profiles/gemini_yunwu_smoke.yaml
 - 已实现离线可测的 reference 准备、query 入库、B 站候选采集、并行下载、切分/过滤、并行标注、导出。
 - 标注字段值域做了严格校验，accepted 样本必须通过 schema 检查。
 - 测试已覆盖 reference 生成、值域校验、LLM 并发闸门、离线 E2E。
+- 已完成一轮真实在线 smoke：B 站抓取、下载、切分、在线标注、导出都已跑通。
 
 当前未覆盖：
 
-- 线上真实 B 站抓取与真实模型调用的集成冒烟尚未在本轮执行。
+- 多 query、多视频规模下的在线稳定性和吞吐压测尚未完成。
 - `ffmpeg` 缺失时，`clip_export_mode=ffmpeg` 无法工作；测试里使用的是 `copy` 模式。
+
+## 仓库清洁约定
+
+- `runtime/`、`data/reference/*.json`、缓存目录和本地 smoke 运行产物都不应提交。
+- 需要复现 smoke 时，直接使用 `configs/profiles/online_smoke.yaml` 重新跑，不保留历史运行目录。
