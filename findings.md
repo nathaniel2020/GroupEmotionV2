@@ -37,6 +37,12 @@
 - 直接把抽象场景名原样送到 B 站搜索，召回质量很差；需要做确定性的 search normalization，优先展开括号中的具体场景词和事件词。
 - 原始 L2 `weak_emotion_signal` 启发词过窄，像“师生教室翻唱”这类明显群体情绪场景会被误拒；补入 `翻唱/合唱/演唱` 后通过。
 - `gemini-3.1-pro-preview + 图片输入` 在这个 smoke clip 上超时；`gemini-3.1-flash-lite-preview + 文本优先` 能在可接受时间内跑通。
+- 当前 `build_query_seed_catalog()` 仍会为每个 seed 固定生成 `scene_text` 和 `scene_text + 现场` 两类宽 query；对很多 seed 来说，这两类 query 缺少事件约束，容易把召回拉向泛场景视频。
+- 当前 `_window_text()` 在字幕存在时只使用字幕文本，不会把 `title/description/tags/scene_text/trigger_text` 一并纳入 L2 判断；真实视频若字幕是对白型文本，就很容易在 `_l2_filter()` 中被 `weak_group_signal` / `weak_emotion_signal` 直接拒掉。
+- 当前 `_l2_filter()` 是硬规则：group hint 至少命中一个、emotion hint 至少命中一个，否则直接 rejected；`use_llm_filter=false` 时没有灰区放行或二次复核路径，因此线上很容易出现 accepted 为 0 的极端结果。
+- 已修正 `build_search_query()`：当 query 是纯 `scene_text` 时，若该 seed 有 trigger，则会自动把 trigger 约束一并带入搜索词，避免“只搜教室/礼堂/操场”这类宽召回。
+- 已修正 `_l2_filter()`：字幕存在时不再只看字幕，而是把字幕与视频元信息联合判断；对白型字幕不会再把本来明显带有群体/情绪信号的样本整批误拒。
+- 已扩展 `ClipRepository.summary()`：`status["clips"]` 现在会直接返回 `top_rejection_reasons`，便于在线判断拒绝是否主要集中在 `weak_group_signal` / `weak_emotion_signal`。
 
 ## Known Gaps
 

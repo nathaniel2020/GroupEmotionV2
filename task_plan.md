@@ -4,7 +4,7 @@
 实现一条轻量但完整的 `query -> B站采集 -> 并行下载 -> 切分/过滤 -> 并行 LLM 标注 -> 导出` 流水线，并将外部参考数据冻结为本地 JSON。
 
 ## Current Phase
-Phase 8
+Phase 10
 
 ## Phases
 
@@ -56,6 +56,12 @@ Phase 8
 - [x] 更新 README 与测试覆盖自动补种 / 自动回填
 - **Status:** complete
 
+### Phase 10: Retrieval / Filter Diagnostics
+- [x] 检查 query 生成与 search normalization 的真实形态
+- [x] 检查 preprocess L1/L2 reject 条件和 accepted 写库逻辑
+- [x] 根据当前诊断落地 query / filter / status 的低风险修正
+- **Status:** complete
+
 ## Key Decisions
 | Decision | Rationale |
 |----------|-----------|
@@ -73,3 +79,4 @@ Phase 8
 - 让真实在线运行积累更多耗时样本，提升 5 天产能估算的稳定性
 - 在真实 VLLM 环境下验证 `annotation_trigger_size=100` 的批触发吞吐与延迟权衡
 - 根据真实数据分布调优 `query_recycle_cooldown_sec` 和 `max_runs_per_query`
+- 基于真实 reject reason 分布调优 query 生成策略和 L2 过滤强度

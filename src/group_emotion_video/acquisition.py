@@ -63,7 +63,9 @@ def build_search_query(query_record: dict[str, Any]) -> str:
     scene_terms = _extract_search_terms(scene_text)
     trigger_terms = _extract_search_terms(trigger_text)
     if query_text == scene_text:
-        terms = scene_terms or _extract_search_terms(query_text)
+        # Pure scene queries are too broad for live retrieval. If the seed has a
+        # trigger, keep the scene anchor but carry trigger terms into search.
+        terms = [*scene_terms, *trigger_terms] if trigger_terms else (scene_terms or _extract_search_terms(query_text))
     elif query_text.endswith("现场"):
         terms = [*(scene_terms or _extract_search_terms(query_text.replace("现场", " ").strip())), "现场"]
     elif scene_text and trigger_text and query_text.startswith(scene_text):

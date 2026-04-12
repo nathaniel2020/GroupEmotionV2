@@ -19,3 +19,12 @@ def test_build_search_query_keeps_scene_terms_for_live_suffix() -> None:
         "query_text": "固定座位空间（教室/考场） 现场",
     }
     assert build_search_query(query) == "教室 考场 现场"
+
+
+def test_build_search_query_scene_only_keeps_trigger_constraints() -> None:
+    query = {
+        "scene_text": "封闭室内大空间（礼堂/体育馆）",
+        "trigger_text": "公开正面能力认可（当众表扬/荣誉称号/竞赛获奖/推荐提名）",
+        "query_text": "封闭室内大空间（礼堂/体育馆）",
+    }
+    assert build_search_query(query) == "礼堂 体育馆 当众表扬 荣誉称号 竞赛获奖 推荐提名"

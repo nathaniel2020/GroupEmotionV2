@@ -524,6 +524,17 @@ class ClipRepository:
             """
         )
         oldest_pending_created_at = str(row["oldest_pending_created_at"]) if row and row["oldest_pending_created_at"] else None
+        rejection_reason_counts: dict[str, int] = {}
+        for rejected_row in self.db.fetchall("SELECT filter_reasons_json FROM clips WHERE filter_status='rejected'"):
+            for reason in self.db.from_json(rejected_row["filter_reasons_json"], []):
+                normalized = str(reason).strip()
+                if not normalized:
+                    continue
+                rejection_reason_counts[normalized] = rejection_reason_counts.get(normalized, 0) + 1
+        top_rejection_reasons = [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(rejection_reason_counts.items(), key=lambda item: (-item[1], item[0]))[:5]
+        ]
         return {
             "total": int(row["total_clips"] or 0) if row else 0,
             "accepted": int(row["accepted_clips"] or 0) if row else 0,
@@ -531,6 +542,7 @@ class ClipRepository:
             "pending_annotation": int(row["pending_annotation_clips"] or 0) if row else 0,
             "annotating": int(row["annotating_clips"] or 0) if row else 0,
             "oldest_pending_created_at": oldest_pending_created_at,
+            "top_rejection_reasons": top_rejection_reasons,
         }
 
     def _deserialize(self, row: Any) -> dict[str, Any]:

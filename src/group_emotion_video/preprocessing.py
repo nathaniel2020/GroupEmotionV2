@@ -108,6 +108,10 @@ class PreprocessingService:
         segments = window.get("transcript_segments") or []
         if segments:
             return " ".join(str(segment.get("text") or "").strip() for segment in segments if str(segment.get("text") or "").strip())
+        return PreprocessingService._metadata_text(video_record)
+
+    @staticmethod
+    def _metadata_text(video_record: dict[str, Any]) -> str:
         tokens = [
             str(video_record.get("title") or ""),
             str(video_record.get("description") or ""),
@@ -116,6 +120,13 @@ class PreprocessingService:
             str(video_record.get("trigger_text") or ""),
         ]
         return " ".join(token for token in tokens if token).strip()
+
+    @staticmethod
+    def _has_any_hint(text: str, hints: set[str]) -> float:
+        if not text:
+            return 0.0
+        lowered = text.lower()
+        return 1.0 if any(token.lower() in lowered for token in hints) else 0.0
 
     def _l1_filter(self, window: dict[str, Any]) -> tuple[bool, list[str]]:
         reasons: list[str] = []
@@ -127,12 +138,21 @@ class PreprocessingService:
         return (not reasons), reasons
 
     def _l2_filter(self, video_record: dict[str, Any], window: dict[str, Any]) -> tuple[bool, dict[str, float], list[str]]:
-        text = self._window_text(video_record, window).lower()
-        group_score = 1.0 if any(token.lower() in text for token in GROUP_HINTS) else 0.0
-        emotion_score = 1.0 if any(token.lower() in text for token in EMOTION_HINTS) else 0.0
+        transcript_text = self._window_text({"title": "", "description": "", "tags": [], "scene_text": "", "trigger_text": ""}, window)
+        metadata_text = self._metadata_text(video_record)
+        transcript_group_score = self._has_any_hint(transcript_text, GROUP_HINTS)
+        metadata_group_score = self._has_any_hint(metadata_text, GROUP_HINTS)
+        transcript_emotion_score = self._has_any_hint(transcript_text, EMOTION_HINTS)
+        metadata_emotion_score = self._has_any_hint(metadata_text, EMOTION_HINTS)
+        group_score = max(transcript_group_score, metadata_group_score)
+        emotion_score = max(transcript_emotion_score, metadata_emotion_score)
         scores = {
             "group_presence_score": group_score,
             "emotion_signal_score": emotion_score,
+            "transcript_group_signal_score": transcript_group_score,
+            "metadata_group_signal_score": metadata_group_score,
+            "transcript_emotion_signal_score": transcript_emotion_score,
+            "metadata_emotion_signal_score": metadata_emotion_score,
         }
         reasons: list[str] = []
         if group_score <= 0.0:
