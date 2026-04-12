@@ -1,0 +1,7 @@
+crawl:
+  query_shard:
+    count: 3
+    index: 1
+  video_shard:
+    count: 3
+    index: 1

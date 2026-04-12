@@ -20,15 +20,15 @@ crawl:
   enrich_workers: 2
   max_items_per_query: 5
   query_shard:
-    count: 1
+    count: 3
     index: 0
   video_shard:
-    count: 1
+    count: 3
     index: 0
   download:
     enabled: true
-    workers: 2
-    max_inflight_per_host: 2
+    workers: 4
+    max_inflight_per_host: 4
     retries: 8
     fragment_retries: 8
     socket_timeout_sec: 30
