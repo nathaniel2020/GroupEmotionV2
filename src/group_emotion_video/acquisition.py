@@ -10,7 +10,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from http.cookiejar import Cookie, MozillaCookieJar
+from http.cookiejar import Cookie
 from http.cookies import SimpleCookie
 from pathlib import Path
 import tempfile
@@ -233,9 +233,13 @@ class BilibiliAdapter:
         pairs = self._cookie_pairs()
         if not pairs:
             return None
+        try:
+            from yt_dlp.cookies import YoutubeDLCookieJar
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError("yt-dlp package is required for live acquisition.") from exc
         handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="bilibili_cookie_", suffix=".txt", delete=False)
         handle.close()
-        jar = MozillaCookieJar(handle.name)
+        jar = YoutubeDLCookieJar(handle.name)
         for key, value in pairs:
             jar.set_cookie(self._netscape_cookie(key, value))
         jar.save(ignore_discard=True, ignore_expires=True)
