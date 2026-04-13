@@ -175,3 +175,15 @@ def test_bilibili_adapter_parses_cookies_from_browser_profile_spec() -> None:
     adapter = BilibiliAdapter(config)
 
     assert adapter._cookies_from_browser_spec() == ("chrome", "~/.config/google-chrome", None, None)
+
+
+def test_bilibili_adapter_uses_configured_cookie_file_before_env_cookie(monkeypatch) -> None:
+    monkeypatch.setenv("BILIBILI_COOKIE", "SESSDATA=env_cookie")
+    config = _adapter_config()
+    config["sources"]["bilibili"]["cookie_file"] = "/tmp/bilibili_cookies.txt"
+    adapter = BilibiliAdapter(config)
+
+    options = adapter._yt_dlp_options(url="https://www.bilibili.com/video/BV1TEST12345")
+
+    assert options["cookiefile"] == "/tmp/bilibili_cookies.txt"
+    assert "cookiesfrombrowser" not in options

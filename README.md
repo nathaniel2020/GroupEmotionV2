@@ -297,6 +297,7 @@ crawl:
 - `crawl.retry.max_attempts`：B 站 412 / 429 / timeout 等瞬时错误的最大尝试次数
 - `crawl.retry.base_sleep_sec` / `max_sleep_sec` / `backoff_factor` / `jitter_sec`：失败后的退避 sleep 策略
 - `sources.bilibili.cookie_env`：从环境变量读取 B 站 cookie，默认读取 `BILIBILI_COOKIE`
+- `sources.bilibili.cookie_file`：直接使用现成的 Netscape `cookies.txt` 文件，适合无桌面服务器
 - `sources.bilibili.cookies_from_browser`：直接让 `yt-dlp` 从浏览器读取 cookie，格式与 `--cookies-from-browser` 一致，如 `chrome`、`chrome:/path/to/profile`
 - `service.download_loop.max_queries_per_cycle`：每个 loop 最多消费多少 query
 - `service.download_loop.max_queries_per_cycle: 0`：表示不限制，当前能跑多少就跑多少
@@ -340,6 +341,16 @@ python scripts/run_pipeline.py --config configs/profiles/continuous_vllm_pipelin
 
 程序内部会把这串 cookie 注入 `requests` 的 cookie jar，并为 `yt-dlp` 生成临时 `cookiefile`，不再把 cookie 作为普通请求头透传。
 
+如果你在无桌面服务器上运行，更推荐直接提供现成的 `cookies.txt` 文件：
+
+```yaml
+sources:
+  bilibili:
+    cookie_file: /path/to/bilibili_cookies.txt
+```
+
+这时下载阶段会直接把这个文件传给 `yt-dlp` 的 `cookiefile`。
+
 如果你本机已经登录过 Chrome / Chromium，更推荐直接在配置里写：
 
 ```yaml
@@ -356,7 +367,11 @@ sources:
     cookies_from_browser: chrome:~/.config/google-chrome
 ```
 
-配置了 `cookies_from_browser` 后，下载阶段会优先使用浏览器 cookie；未配置时才回退到 `BILIBILI_COOKIE` / 临时 `cookiefile`。
+优先级如下：
+
+- 配了 `sources.bilibili.cookies_from_browser`：优先用浏览器 cookie
+- 否则如果配了 `sources.bilibili.cookie_file`：直接用现成 `cookies.txt`
+- 否则回退到 `BILIBILI_COOKIE` / 自动生成的临时 `cookiefile`
 
 ## `status` 解读
 

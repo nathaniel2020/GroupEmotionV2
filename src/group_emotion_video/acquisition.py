@@ -187,6 +187,10 @@ class BilibiliAdapter:
         env_cookie = str(os.getenv(env_name) or "").strip()
         return env_cookie or None
 
+    def _configured_cookie_file(self) -> str | None:
+        raw_path = str(self.source_cfg.get("cookie_file") or "").strip()
+        return raw_path or None
+
     def _cookie_pairs(self) -> list[tuple[str, str]]:
         cookie_value = self._cookie_value()
         if not cookie_value:
@@ -363,7 +367,7 @@ class BilibiliAdapter:
         if cookies_from_browser:
             options["cookiesfrombrowser"] = cookies_from_browser
         else:
-            cookie_file = self._ensure_cookie_file()
+            cookie_file = self._configured_cookie_file() or self._ensure_cookie_file()
             if cookie_file:
                 options["cookiefile"] = cookie_file
         if output_dir is not None:
