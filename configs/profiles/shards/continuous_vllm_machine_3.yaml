@@ -1,4 +1,4 @@
 crawl:
   query_shard:
     count: 5
-    index: 0
+    index: 3
