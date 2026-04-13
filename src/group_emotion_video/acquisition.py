@@ -34,6 +34,14 @@ _RETRYABLE_ERROR_PATTERNS = (
     "remote end closed connection",
     "429 too many requests",
 )
+_COOKIES_FROM_BROWSER_PATTERN = re.compile(
+    r"""(?x)
+    (?P<name>[^+:]+)
+    (?:\s*\+\s*(?P<keyring>[^:]+))?
+    (?:\s*:\s*(?!:)(?P<profile>.+?))?
+    (?:\s*::\s*(?P<container>.+))?
+    """
+)
 
 
 def _normalize_url(url: str | None) -> str | None:
@@ -199,6 +207,21 @@ class BilibiliAdapter:
                 output.append((key, value))
         return output
 
+    def _cookies_from_browser_spec(self) -> tuple[str, str | None, str | None, str | None] | None:
+        raw_spec = str(self.source_cfg.get("cookies_from_browser") or "").strip()
+        if not raw_spec:
+            return None
+        match = _COOKIES_FROM_BROWSER_PATTERN.fullmatch(raw_spec)
+        if match is None:
+            raise ValueError(f"Invalid cookies_from_browser spec: {raw_spec}")
+        browser_name, keyring, profile, container = match.group("name", "keyring", "profile", "container")
+        return (
+            browser_name.lower(),
+            profile,
+            keyring.upper() if keyring else None,
+            container,
+        )
+
     def _apply_session_cookies(self, session: Any) -> None:
         if not self._requests:
             return
@@ -322,11 +345,7 @@ class BilibiliAdapter:
                     raise
                 self._sleep_before_retry(action="http_get", label=label, attempt=attempt, max_attempts=max_attempts, exc=exc)
 
-    def _run_yt_dlp_extract_info(self, url: str, *, download: bool, output_dir: str | None = None, progress_label: str | None = None) -> dict[str, Any]:
-        try:
-            from yt_dlp import YoutubeDL
-        except ImportError as exc:  # pragma: no cover
-            raise RuntimeError("yt-dlp package is required for live acquisition.") from exc
+    def _yt_dlp_options(self, *, url: str, output_dir: str | None = None, progress_label: str | None = None) -> dict[str, Any]:
         download_cfg = self.config["crawl"]["download"]
         options: dict[str, Any] = {
             "quiet": True,
@@ -340,11 +359,23 @@ class BilibiliAdapter:
             "progress_hooks": [self._build_progress_hook(progress_label or str(url))],
             "http_headers": self._http_headers(user_agent=random.choice(self._user_agents)),
         }
-        cookie_file = self._ensure_cookie_file()
-        if cookie_file:
-            options["cookiefile"] = cookie_file
+        cookies_from_browser = self._cookies_from_browser_spec()
+        if cookies_from_browser:
+            options["cookiesfrombrowser"] = cookies_from_browser
+        else:
+            cookie_file = self._ensure_cookie_file()
+            if cookie_file:
+                options["cookiefile"] = cookie_file
         if output_dir is not None:
             options["outtmpl"] = str(Path(output_dir) / "%(id)s.%(ext)s")
+        return options
+
+    def _run_yt_dlp_extract_info(self, url: str, *, download: bool, output_dir: str | None = None, progress_label: str | None = None) -> dict[str, Any]:
+        try:
+            from yt_dlp import YoutubeDL
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError("yt-dlp package is required for live acquisition.") from exc
+        options = self._yt_dlp_options(url=url, output_dir=output_dir, progress_label=progress_label)
         with YoutubeDL(options) as ydl:
             return ydl.extract_info(url, download=download)
 

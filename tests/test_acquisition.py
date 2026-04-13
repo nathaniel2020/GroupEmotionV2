@@ -156,3 +156,22 @@ def test_bilibili_adapter_cookie_file_uses_netscape_format(monkeypatch) -> None:
     assert ("SESSDATA", "test") in cookies
     assert ("bili_jct", "test") in cookies
     adapter._cleanup_cookie_file()
+
+
+def test_bilibili_adapter_uses_cookies_from_browser_when_configured() -> None:
+    config = _adapter_config()
+    config["sources"]["bilibili"]["cookies_from_browser"] = "chrome"
+    adapter = BilibiliAdapter(config)
+
+    options = adapter._yt_dlp_options(url="https://www.bilibili.com/video/BV1TEST12345")
+
+    assert options["cookiesfrombrowser"] == ("chrome", None, None, None)
+    assert "cookiefile" not in options
+
+
+def test_bilibili_adapter_parses_cookies_from_browser_profile_spec() -> None:
+    config = _adapter_config()
+    config["sources"]["bilibili"]["cookies_from_browser"] = "chrome:~/.config/google-chrome"
+    adapter = BilibiliAdapter(config)
+
+    assert adapter._cookies_from_browser_spec() == ("chrome", "~/.config/google-chrome", None, None)

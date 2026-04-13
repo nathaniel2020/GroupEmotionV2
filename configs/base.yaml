@@ -16,6 +16,7 @@ sources:
   bilibili:
     enabled: true
     cookie_env: BILIBILI_COOKIE
+    cookies_from_browser:
     max_pages_per_query: 2
     max_items_per_query: 5
     search_timeout_sec: 20
