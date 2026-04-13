@@ -297,7 +297,7 @@ crawl:
 - `crawl.retry.max_attempts`：B 站 412 / 429 / timeout 等瞬时错误的最大尝试次数
 - `crawl.retry.base_sleep_sec` / `max_sleep_sec` / `backoff_factor` / `jitter_sec`：失败后的退避 sleep 策略
 - `sources.bilibili.cookie_env`：从环境变量读取 B 站 cookie，默认读取 `BILIBILI_COOKIE`
-- `sources.bilibili.cookie_file`：直接使用现成的 Netscape `cookies.txt` 文件，适合无桌面服务器
+- `sources.bilibili.cookie_file`：读取现成的 `cookies.txt` / JSON cookie 导出文件，过滤出 B 站相关 cookie 后再生成临时 Netscape `cookiefile`，适合无桌面服务器
 - `sources.bilibili.cookies_from_browser`：直接让 `yt-dlp` 从浏览器读取 cookie，格式与 `--cookies-from-browser` 一致，如 `chrome`、`chrome:/path/to/profile`
 - `service.download_loop.max_queries_per_cycle`：每个 loop 最多消费多少 query
 - `service.download_loop.max_queries_per_cycle: 0`：表示不限制，当前能跑多少就跑多少
@@ -349,7 +349,7 @@ sources:
     cookie_file: /path/to/bilibili_cookies.txt
 ```
 
-这时下载阶段会直接把这个文件传给 `yt-dlp` 的 `cookiefile`。
+这时下载阶段会先过滤出 B 站相关 cookie，再生成干净的临时 `cookiefile` 交给 `yt-dlp`。原文件里混入的其他站点 cookie 或坏行会被忽略。
 
 如果你本机已经登录过 Chrome / Chromium，更推荐直接在配置里写：
 

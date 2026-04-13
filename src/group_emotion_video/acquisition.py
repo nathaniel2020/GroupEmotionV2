@@ -42,6 +42,7 @@ _COOKIES_FROM_BROWSER_PATTERN = re.compile(
     (?:\s*::\s*(?P<container>.+))?
     """
 )
+_BILIBILI_COOKIE_DOMAINS = ("bilibili.com", "bilibili.cn")
 
 
 def _normalize_url(url: str | None) -> str | None:
@@ -132,6 +133,7 @@ class BilibiliAdapter:
         self._requests = None
         self._session = None
         self._cookie_file_path: str | None = None
+        self._cookie_file_lock = threading.Lock()
         self._user_agents = [
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -187,9 +189,14 @@ class BilibiliAdapter:
         env_cookie = str(os.getenv(env_name) or "").strip()
         return env_cookie or None
 
-    def _configured_cookie_file(self) -> str | None:
+    def _configured_cookie_file_source(self) -> str | None:
         raw_path = str(self.source_cfg.get("cookie_file") or "").strip()
         return raw_path or None
+
+    @staticmethod
+    def _is_bilibili_cookie_domain(domain: str | None) -> bool:
+        normalized = str(domain or "").strip().lower().lstrip(".")
+        return any(normalized == root or normalized.endswith(f".{root}") for root in _BILIBILI_COOKIE_DOMAINS)
 
     def _cookie_pairs(self) -> list[tuple[str, str]]:
         cookie_value = self._cookie_value()
@@ -229,51 +236,207 @@ class BilibiliAdapter:
     def _apply_session_cookies(self, session: Any) -> None:
         if not self._requests:
             return
+        configured_cookies = self._configured_cookie_entries()
+        if configured_cookies:
+            for cookie in configured_cookies:
+                session.cookies.set(cookie.name, cookie.value, domain=cookie.domain, path=cookie.path, secure=cookie.secure)
+            return
         for key, value in self._cookie_pairs():
-            session.cookies.set(key, value, domain=".bilibili.com", path="/")
+            session.cookies.set(key, value, domain=".bilibili.com", path="/", secure=True)
 
     @staticmethod
-    def _netscape_cookie(name: str, value: str) -> Cookie:
+    def _netscape_cookie(
+        name: str,
+        value: str,
+        *,
+        domain: str = ".bilibili.com",
+        path: str = "/",
+        secure: bool = True,
+        expires: int | None = None,
+    ) -> Cookie:
         return Cookie(
             version=0,
             name=name,
             value=value,
             port=None,
             port_specified=False,
-            domain=".bilibili.com",
-            domain_specified=True,
-            domain_initial_dot=True,
-            path="/",
+            domain=domain,
+            domain_specified=bool(domain),
+            domain_initial_dot=domain.startswith("."),
+            path=path or "/",
             path_specified=True,
-            secure=True,
-            expires=None,
-            discard=True,
+            secure=secure,
+            expires=expires,
+            discard=expires in (None, 0),
             comment=None,
             comment_url=None,
             rest={},
             rfc2109=False,
         )
 
-    def _ensure_cookie_file(self) -> str | None:
-        if self._cookie_file_path is not None:
+    def _log_cookie_skip(self, *, source: str, lineno: int, reason: str, line: str) -> None:
+        if not self.logger:
+            return
+        preview = line.strip()
+        if len(preview) > 120:
+            preview = f"{preview[:117]}..."
+        self.logger.warning(
+            "cookie_file_skip path=%s line=%s reason=%s content=%r",
+            source,
+            lineno,
+            reason,
+            preview,
+        )
+
+    def _parse_inline_cookie_text(self, text: str) -> list[Cookie]:
+        pairs: list[tuple[str, str]] = []
+        jar = SimpleCookie()
+        jar.load(text)
+        pairs.extend((key, morsel.value) for key, morsel in jar.items())
+        if not pairs:
+            for chunk in text.split(";"):
+                if "=" not in chunk:
+                    continue
+                key, value = chunk.split("=", 1)
+                key = key.strip()
+                if not key:
+                    continue
+                pairs.append((key, value.strip()))
+        deduped: dict[str, str] = {}
+        for key, value in pairs:
+            deduped[key] = value
+        return [self._netscape_cookie(name, value) for name, value in deduped.items()]
+
+    def _parse_json_cookie_text(self, text: str) -> list[Cookie]:
+        stripped = text.lstrip()
+        if not stripped or stripped[0] not in "[{":
+            return []
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(payload, dict):
+            raw_items = payload.get("cookies")
+        else:
+            raw_items = payload
+        if not isinstance(raw_items, list):
+            return []
+        cookies: list[Cookie] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            domain = str(item.get("domain") or item.get("host") or "").strip()
+            name = str(item.get("name") or "").strip()
+            if not name or not self._is_bilibili_cookie_domain(domain):
+                continue
+            raw_expires = item.get("expirationDate", item.get("expires", item.get("expiry")))
+            expires: int | None = None
+            if raw_expires not in (None, "", 0, "0"):
+                try:
+                    expires = int(float(raw_expires))
+                except (TypeError, ValueError):
+                    expires = None
+            cookies.append(
+                self._netscape_cookie(
+                    name,
+                    str(item.get("value") or ""),
+                    domain=domain,
+                    path=str(item.get("path") or "/") or "/",
+                    secure=bool(item.get("secure")),
+                    expires=expires,
+                )
+            )
+        return cookies
+
+    def _parse_netscape_cookie_text(self, text: str, *, source: str) -> list[Cookie]:
+        cookies: list[Cookie] = []
+        for lineno, raw_line in enumerate(text.splitlines(), start=1):
+            line = raw_line.lstrip("\ufeff")
+            if line.startswith("#HttpOnly_"):
+                line = line[len("#HttpOnly_"):]
+            if not line.strip() or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 7:
+                if "bilibili" in line.lower():
+                    self._log_cookie_skip(source=source, lineno=lineno, reason=f"invalid_length_{len(parts)}", line=line)
+                continue
+            domain_name, _include_subdomains, path, https_only, expires_at, name, *value_parts = parts
+            domain_name = domain_name.strip()
+            name = name.strip()
+            if not name or not self._is_bilibili_cookie_domain(domain_name):
+                continue
+            expires: int | None = None
+            expires_text = expires_at.strip()
+            if expires_text and expires_text != "0":
+                if expires_text.isdigit():
+                    expires = int(expires_text)
+                else:
+                    self._log_cookie_skip(source=source, lineno=lineno, reason="invalid_expires", line=line)
+                    continue
+            cookies.append(
+                self._netscape_cookie(
+                    name,
+                    "\t".join(value_parts),
+                    domain=domain_name,
+                    path=path.strip() or "/",
+                    secure=https_only.strip().upper() == "TRUE",
+                    expires=expires,
+                )
+            )
+        return cookies
+
+    def _configured_cookie_entries(self) -> list[Cookie]:
+        source = self._configured_cookie_file_source()
+        if not source:
+            return []
+        path = Path(os.path.expanduser(source))
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            if self.logger:
+                self.logger.warning("cookie_file_unreadable path=%s error=%s", str(path), exc)
+            return []
+        cookies = self._parse_json_cookie_text(text)
+        if cookies:
+            return cookies
+        cookies = self._parse_netscape_cookie_text(text, source=str(path))
+        if cookies:
+            return cookies
+        stripped = text.strip()
+        if stripped and "\n" not in stripped and "\t" not in stripped and "=" in stripped:
+            return self._parse_inline_cookie_text(stripped)
+        return []
+
+    def _write_cookie_file(self, cookies: list[Cookie]) -> str | None:
+        if not cookies:
+            return None
+        with self._cookie_file_lock:
+            if self._cookie_file_path is not None:
+                return self._cookie_file_path
+            try:
+                from yt_dlp.cookies import YoutubeDLCookieJar
+            except ImportError as exc:  # pragma: no cover
+                raise RuntimeError("yt-dlp package is required for live acquisition.") from exc
+            handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="bilibili_cookie_", suffix=".txt", delete=False)
+            handle.close()
+            jar = YoutubeDLCookieJar(handle.name)
+            for cookie in cookies:
+                jar.set_cookie(cookie)
+            jar.save(ignore_discard=True, ignore_expires=True)
+            os.chmod(handle.name, 0o600)
+            self._cookie_file_path = handle.name
+            atexit.register(self._cleanup_cookie_file)
             return self._cookie_file_path
+
+    def _ensure_cookie_file(self) -> str | None:
+        configured_cookies = self._configured_cookie_entries()
+        if configured_cookies:
+            return self._write_cookie_file(configured_cookies)
         pairs = self._cookie_pairs()
         if not pairs:
             return None
-        try:
-            from yt_dlp.cookies import YoutubeDLCookieJar
-        except ImportError as exc:  # pragma: no cover
-            raise RuntimeError("yt-dlp package is required for live acquisition.") from exc
-        handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="bilibili_cookie_", suffix=".txt", delete=False)
-        handle.close()
-        jar = YoutubeDLCookieJar(handle.name)
-        for key, value in pairs:
-            jar.set_cookie(self._netscape_cookie(key, value))
-        jar.save(ignore_discard=True, ignore_expires=True)
-        os.chmod(handle.name, 0o600)
-        self._cookie_file_path = handle.name
-        atexit.register(self._cleanup_cookie_file)
-        return self._cookie_file_path
+        return self._write_cookie_file([self._netscape_cookie(key, value) for key, value in pairs])
 
     def _cleanup_cookie_file(self) -> None:
         if not self._cookie_file_path:
@@ -367,7 +530,7 @@ class BilibiliAdapter:
         if cookies_from_browser:
             options["cookiesfrombrowser"] = cookies_from_browser
         else:
-            cookie_file = self._configured_cookie_file() or self._ensure_cookie_file()
+            cookie_file = self._ensure_cookie_file()
             if cookie_file:
                 options["cookiefile"] = cookie_file
         if output_dir is not None:
