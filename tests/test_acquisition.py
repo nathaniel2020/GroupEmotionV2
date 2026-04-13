@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 
 import group_emotion_video.acquisition as acquisition_module
@@ -148,6 +149,9 @@ def test_bilibili_adapter_cookie_file_uses_netscape_format(monkeypatch) -> None:
     assert cookie_file is not None
     content = Path(cookie_file).read_text(encoding="utf-8")
     assert "# Netscape HTTP Cookie File" in content
-    assert ".bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\ttest" in content
-    assert ".bilibili.com\tTRUE\t/\tTRUE\t0\tbili_jct\ttest" in content
+    jar = MozillaCookieJar(cookie_file)
+    jar.load(ignore_discard=True, ignore_expires=True)
+    cookies = {(cookie.name, cookie.value) for cookie in jar}
+    assert ("SESSDATA", "test") in cookies
+    assert ("bili_jct", "test") in cookies
     adapter._cleanup_cookie_file()

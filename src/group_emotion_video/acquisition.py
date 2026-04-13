@@ -10,6 +10,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from http.cookiejar import Cookie, MozillaCookieJar
 from http.cookies import SimpleCookie
 from pathlib import Path
 import tempfile
@@ -204,6 +205,28 @@ class BilibiliAdapter:
         for key, value in self._cookie_pairs():
             session.cookies.set(key, value, domain=".bilibili.com", path="/")
 
+    @staticmethod
+    def _netscape_cookie(name: str, value: str) -> Cookie:
+        return Cookie(
+            version=0,
+            name=name,
+            value=value,
+            port=None,
+            port_specified=False,
+            domain=".bilibili.com",
+            domain_specified=True,
+            domain_initial_dot=True,
+            path="/",
+            path_specified=True,
+            secure=True,
+            expires=None,
+            discard=True,
+            comment=None,
+            comment_url=None,
+            rest={},
+            rfc2109=False,
+        )
+
     def _ensure_cookie_file(self) -> str | None:
         if self._cookie_file_path is not None:
             return self._cookie_file_path
@@ -211,11 +234,11 @@ class BilibiliAdapter:
         if not pairs:
             return None
         handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="bilibili_cookie_", suffix=".txt", delete=False)
-        lines = ["# Netscape HTTP Cookie File", ""]
-        for key, value in pairs:
-            lines.append(f".bilibili.com\tTRUE\t/\tTRUE\t0\t{key}\t{value}")
-        handle.write("\n".join(lines) + "\n")
         handle.close()
+        jar = MozillaCookieJar(handle.name)
+        for key, value in pairs:
+            jar.set_cookie(self._netscape_cookie(key, value))
+        jar.save(ignore_discard=True, ignore_expires=True)
         os.chmod(handle.name, 0o600)
         self._cookie_file_path = handle.name
         atexit.register(self._cleanup_cookie_file)
