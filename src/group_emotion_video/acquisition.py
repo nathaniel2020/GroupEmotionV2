@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import hashlib
 import json
+import logging
 import os
 import random
 import re
@@ -22,6 +23,8 @@ from .types import CandidateVideo, DownloadResult
 
 
 _QUERY_SPLIT_PATTERN = re.compile(r"[、,，/／|｜]+")
+_ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_BILIBILI_BVID_PATTERN = re.compile(r"(BV[0-9A-Za-z]{10})", re.IGNORECASE)
 _RETRYABLE_ERROR_PATTERNS = (
     "http error 412",
     "precondition failed",
@@ -34,6 +37,10 @@ _RETRYABLE_ERROR_PATTERNS = (
     "remote end closed connection",
     "429 too many requests",
 )
+_FORMAT_NOT_FOUND_ERROR_PATTERNS = (
+    "no video formats found",
+    "requested format is not available",
+)
 _COOKIES_FROM_BROWSER_PATTERN = re.compile(
     r"""(?x)
     (?P<name>[^+:]+)
@@ -45,6 +52,40 @@ _COOKIES_FROM_BROWSER_PATTERN = re.compile(
 _BILIBILI_COOKIE_DOMAINS = ("bilibili.com", "bilibili.cn")
 
 
+def _strip_ansi(text: str) -> str:
+    return _ANSI_ESCAPE_PATTERN.sub("", text)
+
+
+class _YtDlpLogger:
+    def __init__(self, logger: Any | None, *, label: str):
+        self.logger = logger
+        self.label = label
+        self.last_error: str | None = None
+
+    def debug(self, message: Any) -> None:
+        self._log(logging.DEBUG, message)
+
+    def warning(self, message: Any) -> None:
+        self._log(logging.WARNING, message)
+
+    def error(self, message: Any) -> None:
+        cleaned = _strip_ansi(str(message or "").strip())
+        if cleaned:
+            self.last_error = cleaned
+        # yt-dlp will raise after calling logger.error. Avoid duplicating the same
+        # raw extractor message on stderr; the adapter wraps it into a structured
+        # error string later.
+        self._log(logging.DEBUG, cleaned)
+
+    def _log(self, level: int, message: Any) -> None:
+        if not self.logger:
+            return
+        cleaned = _strip_ansi(str(message or "").strip())
+        if not cleaned:
+            return
+        self.logger.log(level, "yt_dlp target=%s message=%s", self.label, cleaned)
+
+
 def _normalize_url(url: str | None) -> str | None:
     if not url:
         return None
@@ -53,6 +94,16 @@ def _normalize_url(url: str | None) -> str | None:
     if url.startswith(("http://", "https://")):
         return url
     return f"https://{url.lstrip('/')}"
+
+
+def _canonical_bilibili_video_id(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    match = _BILIBILI_BVID_PATTERN.search(text)
+    if not match:
+        return text
+    return match.group(1)
 
 
 def _safe_dir_name(text: str) -> str:
@@ -134,6 +185,7 @@ class BilibiliAdapter:
         self._session = None
         self._cookie_file_path: str | None = None
         self._cookie_file_lock = threading.Lock()
+        self._warned_cookieless_download = False
         self._user_agents = [
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -475,6 +527,16 @@ class BilibiliAdapter:
             headers["User-Agent"] = user_agent
         return headers
 
+    def _canonical_video_id(self, value: str | None) -> str | None:
+        return _canonical_bilibili_video_id(value)
+
+    def _canonical_video_url(self, url: str | None, *, platform_video_id: str | None = None) -> str:
+        normalized_url = _normalize_url(url) or ""
+        canonical_id = self._canonical_video_id(platform_video_id) or self._canonical_video_id(normalized_url)
+        if canonical_id:
+            return f"https://www.bilibili.com/video/{canonical_id}"
+        return normalized_url
+
     def _retry_cfg(self) -> dict[str, float]:
         cfg = (self.config.get("crawl") or {}).get("retry") or {}
         return {
@@ -487,8 +549,66 @@ class BilibiliAdapter:
 
     @staticmethod
     def _is_retryable_error(exc: Exception) -> bool:
-        text = str(exc).lower()
+        text = _strip_ansi(str(exc)).lower()
         return any(pattern in text for pattern in _RETRYABLE_ERROR_PATTERNS)
+
+    def _cookie_source_label(self) -> str:
+        cookies_from_browser = self._cookies_from_browser_spec()
+        if cookies_from_browser:
+            browser_name, profile, keyring, container = cookies_from_browser
+            details = [browser_name]
+            if profile:
+                details.append(f"profile={profile}")
+            if keyring:
+                details.append(f"keyring={keyring}")
+            if container:
+                details.append(f"container={container}")
+            return f"cookies_from_browser:{','.join(details)}"
+        configured_cookie_file = self._configured_cookie_file_source()
+        if configured_cookie_file:
+            path = Path(os.path.expanduser(configured_cookie_file))
+            if path.is_file() and os.access(path, os.R_OK):
+                return f"cookie_file:{path}"
+            return f"cookie_file_unreadable:{path}"
+        if self._cookie_value():
+            if str(self.source_cfg.get("cookie") or "").strip():
+                return "inline_cookie"
+            raw_env_name = self.source_cfg.get("cookie_env")
+            env_name = "BILIBILI_COOKIE" if raw_env_name is None else str(raw_env_name).strip()
+            return f"cookie_env:{env_name or 'disabled'}"
+        return "none"
+
+    @staticmethod
+    def _yt_dlp_version() -> str | None:
+        try:
+            from yt_dlp.version import __version__
+        except ImportError:
+            return None
+        return str(__version__).strip() or None
+
+    def _yt_dlp_logger(self, label: str) -> _YtDlpLogger:
+        return _YtDlpLogger(self.logger, label=label)
+
+    def _format_download_error(self, exc: Exception) -> str:
+        message = _strip_ansi(str(exc).strip())
+        lowered = message.lower()
+        if not any(pattern in lowered for pattern in _FORMAT_NOT_FOUND_ERROR_PATTERNS):
+            return message
+        details = [
+            "Bilibili exposed no playable formats to yt-dlp.",
+            f"cookie_source={self._cookie_source_label()}.",
+        ]
+        version = self._yt_dlp_version()
+        if version:
+            details.append(f"yt_dlp_version={version}.")
+        details.append(
+            "Refresh yt-dlp and provide a fresh logged-in cookie via "
+            "sources.bilibili.cookies_from_browser, sources.bilibili.cookie_file, or BILIBILI_COOKIE_FILE."
+        )
+        details.append(
+            "If the same account cannot play the video in a normal browser session, the pipeline will not be able to download it either."
+        )
+        return f"{message} {' '.join(details)}"
 
     def _retry_sleep_sec(self, attempt: int) -> float:
         cfg = self._retry_cfg()
@@ -509,7 +629,7 @@ class BilibiliAdapter:
             attempt,
             max_attempts,
             sleep_sec,
-            exc,
+            _strip_ansi(str(exc)),
         )
 
     def _sleep_before_retry(self, *, action: str, label: str, attempt: int, max_attempts: int, exc: Exception) -> None:
@@ -533,6 +653,7 @@ class BilibiliAdapter:
 
     def _yt_dlp_options(self, *, url: str, output_dir: str | None = None, progress_label: str | None = None) -> dict[str, Any]:
         download_cfg = self.config["crawl"]["download"]
+        label = progress_label or str(url)
         options: dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
@@ -542,8 +663,9 @@ class BilibiliAdapter:
             "fragment_retries": int(download_cfg.get("fragment_retries", 8)),
             "socket_timeout": int(download_cfg.get("socket_timeout_sec", 30)),
             "noprogress": True,
-            "progress_hooks": [self._build_progress_hook(progress_label or str(url))],
+            "progress_hooks": [self._build_progress_hook(label)],
             "http_headers": self._http_headers(user_agent=random.choice(self._user_agents)),
+            "logger": self._yt_dlp_logger(label),
         }
         cookies_from_browser = self._cookies_from_browser_spec()
         if cookies_from_browser:
@@ -552,6 +674,13 @@ class BilibiliAdapter:
             cookie_file = self._ensure_cookie_file()
             if cookie_file:
                 options["cookiefile"] = cookie_file
+        if "cookiesfrombrowser" not in options and "cookiefile" not in options and self.logger and not self._warned_cookieless_download:
+            self._warned_cookieless_download = True
+            self.logger.warning(
+                "bilibili_download_without_cookie url=%s hint=%s",
+                url,
+                "set sources.bilibili.cookies_from_browser or sources.bilibili.cookie_file / BILIBILI_COOKIE_FILE",
+            )
         if output_dir is not None:
             options["outtmpl"] = str(Path(output_dir) / "%(id)s.%(ext)s")
         return options
@@ -602,7 +731,7 @@ class BilibiliAdapter:
                 if rows:
                     break
             for row in rows:
-                bvid = row.get("bvid") or row.get("bv_id")
+                bvid = self._canonical_video_id(row.get("bvid") or row.get("bv_id"))
                 if not bvid or bvid in seen_ids:
                     continue
                 seen_ids.add(bvid)
@@ -612,7 +741,7 @@ class BilibiliAdapter:
                     CandidateVideo(
                         platform="bilibili",
                         platform_video_id=bvid,
-                        url=_normalize_url(row.get("arcurl") or f"https://www.bilibili.com/video/{bvid}") or "",
+                        url=self._canonical_video_url(row.get("arcurl") or f"https://www.bilibili.com/video/{bvid}", platform_video_id=bvid),
                         title=title,
                         uploader=row.get("author") or row.get("uname"),
                         publish_time=str(row.get("pubdate") or row.get("ctime") or ""),
@@ -669,12 +798,14 @@ class BilibiliAdapter:
         return []
 
     def enrich(self, candidate: CandidateVideo) -> CandidateVideo:
-        info = self._extract_info(candidate.url, download=False, progress_label=candidate.platform_video_id)
+        canonical_video_id = self._canonical_video_id(candidate.platform_video_id) or candidate.platform_video_id
+        canonical_url = self._canonical_video_url(candidate.url, platform_video_id=canonical_video_id)
+        info = self._extract_info(canonical_url, download=False, progress_label=canonical_video_id)
         subtitle_segments = self._fetch_subtitle_segments(info)
         return CandidateVideo(
             platform=candidate.platform,
-            platform_video_id=candidate.platform_video_id,
-            url=candidate.url,
+            platform_video_id=canonical_video_id,
+            url=canonical_url,
             title=info.get("title") or candidate.title,
             uploader=info.get("uploader") or candidate.uploader,
             publish_time=str(info.get("timestamp") or candidate.publish_time or ""),
@@ -689,7 +820,7 @@ class BilibiliAdapter:
                 "view_count": info.get("view_count"),
                 "like_count": info.get("like_count"),
                 "comment_count": info.get("comment_count"),
-                "webpage_url": info.get("webpage_url") or candidate.url,
+                "webpage_url": info.get("webpage_url") or canonical_url,
                 "subtitles": bool(info.get("subtitles")),
                 "automatic_captions": bool(info.get("automatic_captions")),
             },
@@ -700,24 +831,33 @@ class BilibiliAdapter:
         )
 
     def download(self, candidate: CandidateVideo, output_dir: str) -> DownloadResult:
+        canonical_video_id = self._canonical_video_id(candidate.platform_video_id) or candidate.platform_video_id
+        canonical_url = self._canonical_video_url(candidate.url, platform_video_id=canonical_video_id)
         if self.logger:
-            self.logger.info("download_start bvid=%s title=%s", candidate.platform_video_id, candidate.title)
+            self.logger.info(
+                "download_start bvid=%s title=%s cookie_source=%s yt_dlp_version=%s",
+                canonical_video_id,
+                candidate.title,
+                self._cookie_source_label(),
+                self._yt_dlp_version() or "unknown",
+            )
         try:
-            info = self._extract_info(candidate.url, download=True, output_dir=output_dir, progress_label=candidate.platform_video_id)
+            info = self._extract_info(canonical_url, download=True, output_dir=output_dir, progress_label=canonical_video_id)
         except Exception as exc:  # pragma: no cover
+            error_message = self._format_download_error(exc)
             if self.logger:
-                self.logger.exception("download_failed bvid=%s error=%s", candidate.platform_video_id, exc)
-            return DownloadResult(status="failed", error_message=str(exc))
+                self.logger.exception("download_failed bvid=%s error=%s", canonical_video_id, error_message)
+            return DownloadResult(status="failed", error_message=error_message)
         requested = info.get("requested_downloads") or []
         local_path = None
         if requested:
             local_path = requested[0].get("filepath")
         if not local_path:
-            local_path = str(Path(output_dir) / f"{info.get('id', candidate.platform_video_id)}.{info.get('ext', 'mp4')}")
+            local_path = str(Path(output_dir) / f"{info.get('id', canonical_video_id)}.{info.get('ext', 'mp4')}")
         path = Path(local_path)
         size = int(path.stat().st_size) if path.exists() else None
         if self.logger:
-            self.logger.info("download_finish bvid=%s status=%s file_size_bytes=%s", candidate.platform_video_id, "downloaded" if path.exists() else "failed", size)
+            self.logger.info("download_finish bvid=%s status=%s file_size_bytes=%s", canonical_video_id, "downloaded" if path.exists() else "failed", size)
         return DownloadResult(status="downloaded" if path.exists() else "failed", local_path=str(path), file_size_bytes=size)
 
 

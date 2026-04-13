@@ -89,11 +89,40 @@ class _RetryingExtractAdapter(BilibiliAdapter):
         }
 
 
+class _FailingExtractAdapter(BilibiliAdapter):
+    def __init__(self, config: dict, failure: Exception):
+        super().__init__(config)
+        self.failure = failure
+
+    def _run_yt_dlp_extract_info(self, url: str, *, download: bool, output_dir: str | None = None, progress_label: str | None = None) -> dict:
+        raise self.failure
+
+
+class _CapturingExtractAdapter(_RetryingExtractAdapter):
+    def __init__(self, config: dict, failures: list[Exception]):
+        super().__init__(config, failures)
+        self.seen_calls: list[tuple[str, bool, str | None]] = []
+
+    def _run_yt_dlp_extract_info(self, url: str, *, download: bool, output_dir: str | None = None, progress_label: str | None = None) -> dict:
+        self.seen_calls.append((url, download, progress_label))
+        return super()._run_yt_dlp_extract_info(url, download=download, output_dir=output_dir, progress_label=progress_label)
+
+
 def _candidate() -> CandidateVideo:
     return CandidateVideo(
         platform="bilibili",
         platform_video_id="BV1TEST12345",
         url="https://www.bilibili.com/video/BV1TEST12345",
+        title="课堂欢呼",
+        duration_sec=36.0,
+    )
+
+
+def _dirty_candidate() -> CandidateVideo:
+    return CandidateVideo(
+        platform="bilibili",
+        platform_video_id="BV1xg4y127NW_1413028345",
+        url="https://www.bilibili.com/video/BV1xg4y127NW_1413028345",
         title="课堂欢呼",
         duration_sec=36.0,
     )
@@ -114,6 +143,15 @@ def test_bilibili_adapter_download_retries_after_412(tmp_path: Path, monkeypatch
     assert sleep_calls == [0.01]
 
 
+def test_bilibili_adapter_download_normalizes_bvid_cid_suffix(tmp_path: Path) -> None:
+    adapter = _CapturingExtractAdapter(_adapter_config(), failures=[])
+
+    result = adapter.download(_dirty_candidate(), str(tmp_path))
+
+    assert result.status == "downloaded"
+    assert adapter.seen_calls == [("https://www.bilibili.com/video/BV1xg4y127NW", True, "BV1xg4y127NW")]
+
+
 def test_bilibili_adapter_enrich_retries_after_timeout(monkeypatch) -> None:
     sleep_calls: list[float] = []
     monkeypatch.setattr(acquisition_module.time, "sleep", lambda sec: sleep_calls.append(sec))
@@ -127,6 +165,47 @@ def test_bilibili_adapter_enrich_retries_after_timeout(monkeypatch) -> None:
     assert enriched.title == "课堂欢呼"
     assert adapter.calls == 2
     assert sleep_calls == [0.01]
+
+
+def test_bilibili_adapter_enrich_normalizes_bvid_cid_suffix() -> None:
+    adapter = _CapturingExtractAdapter(_adapter_config(), failures=[])
+
+    enriched = adapter.enrich(_dirty_candidate())
+
+    assert enriched.platform_video_id == "BV1xg4y127NW"
+    assert enriched.url == "https://www.bilibili.com/video/BV1xg4y127NW"
+    assert adapter.seen_calls == [("https://www.bilibili.com/video/BV1xg4y127NW", False, "BV1xg4y127NW")]
+
+
+def test_bilibili_adapter_surfaces_actionable_no_formats_error(monkeypatch) -> None:
+    adapter = _FailingExtractAdapter(
+        _adapter_config(),
+        Exception("ERROR: [BiliBili] BV1TEST12345: No video formats found!"),
+    )
+    monkeypatch.setattr(adapter, "_yt_dlp_version", lambda: "2025.06.09")
+
+    result = adapter.download(_candidate(), ".")
+
+    assert result.status == "failed"
+    assert result.error_message is not None
+    assert "Bilibili exposed no playable formats to yt-dlp." in result.error_message
+    assert "cookie_source=none" in result.error_message
+    assert "yt_dlp_version=2025.06.09" in result.error_message
+    assert "sources.bilibili.cookie_file" in result.error_message
+
+
+def test_bilibili_adapter_strips_ansi_sequences_from_download_errors(monkeypatch) -> None:
+    adapter = _FailingExtractAdapter(
+        _adapter_config(),
+        Exception("\x1b[0;31mERROR:\x1b[0m [BiliBili] BV1TEST12345: No video formats found!"),
+    )
+    monkeypatch.setattr(adapter, "_yt_dlp_version", lambda: "2025.06.09")
+
+    result = adapter.download(_candidate(), ".")
+
+    assert result.error_message is not None
+    assert "\x1b" not in result.error_message
+    assert "ERROR: [BiliBili] BV1TEST12345: No video formats found!" in result.error_message
 
 
 def test_bilibili_adapter_http_headers_include_cookie_from_env(monkeypatch) -> None:
@@ -167,6 +246,18 @@ def test_bilibili_adapter_uses_cookies_from_browser_when_configured() -> None:
 
     assert options["cookiesfrombrowser"] == ("chrome", None, None, None)
     assert "cookiefile" not in options
+
+
+def test_bilibili_adapter_attaches_custom_yt_dlp_logger() -> None:
+    adapter = BilibiliAdapter(_adapter_config())
+
+    options = adapter._yt_dlp_options(url="https://www.bilibili.com/video/BV1TEST12345")
+    yt_logger = options["logger"]
+    yt_logger.error("\x1b[0;31mERROR:\x1b[0m test")
+
+    assert hasattr(yt_logger, "debug")
+    assert hasattr(yt_logger, "warning")
+    assert yt_logger.last_error == "ERROR: test"
 
 
 def test_bilibili_adapter_parses_cookies_from_browser_profile_spec() -> None:
@@ -304,3 +395,31 @@ def test_bilibili_adapter_applies_configured_cookie_file_to_session(tmp_path: Pa
     assert session.cookies.calls == [
         ("SESSDATA", "file_cookie", {"domain": ".bilibili.com", "path": "/", "secure": True})
     ]
+
+
+def test_bilibili_adapter_logs_cookie_source_and_version_on_download_start(tmp_path: Path, monkeypatch) -> None:
+    messages: list[str] = []
+
+    class _Logger:
+        def info(self, message: str, *args) -> None:
+            messages.append(message % args if args else message)
+
+        def warning(self, message: str, *args) -> None:
+            messages.append(message % args if args else message)
+
+        def exception(self, message: str, *args) -> None:
+            messages.append(message % args if args else message)
+
+        def log(self, _level: int, message: str, *args) -> None:
+            messages.append(message % args if args else message)
+
+    monkeypatch.setenv("BILIBILI_COOKIE", "SESSDATA=test")
+    adapter = _RetryingExtractAdapter(_adapter_config(), failures=[])
+    adapter.logger = _Logger()
+    monkeypatch.setattr(adapter, "_yt_dlp_version", lambda: "2026.03.17")
+
+    result = adapter.download(_candidate(), str(tmp_path))
+
+    assert result.status == "downloaded"
+    assert any("cookie_source=cookie_env:BILIBILI_COOKIE" in message for message in messages)
+    assert any("yt_dlp_version=2026.03.17" in message for message in messages)
