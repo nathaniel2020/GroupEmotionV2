@@ -32,17 +32,14 @@ pip install -e .
 
 如果需要带登录态抓取，还要先确认 cookie 配置。
 
-当前 `configs/base.yaml` 里默认写了：
-
-- `sources.bilibili.cookie_file: "/Users/aidan/Downloads/bilibili_cookies.txt"`
-
-这个路径只是本机示例，不保证 3 台机器上都存在。每台机器都要改成自己本地真实可读的路径，或者改成下面别的方式。
+当前 `configs/base.yaml` 默认不绑定固定 cookie 文件路径。你可以按机器实际情况选择是否带 cookie。
 
 推荐优先级：
 
 - 已登录桌面浏览器：`sources.bilibili.cookies_from_browser`
-- 无桌面服务器：`sources.bilibili.cookie_file`
+- 无桌面服务器：`sources.bilibili.cookie_file` 或环境变量 `BILIBILI_COOKIE_FILE`
 - 临时测试：环境变量 `BILIBILI_COOKIE`
+- 完全无 cookie：保持这些配置为空，不导出环境变量
 
 方式 1：直接从浏览器读取 cookie
 
@@ -60,7 +57,7 @@ sources:
     cookies_from_browser: chrome:~/.config/google-chrome
 ```
 
-方式 2：提供现成的 `cookies.txt` / JSON cookie 导出文件
+方式 2：提供现成的 `cookies.txt`
 
 ```yaml
 sources:
@@ -68,7 +65,15 @@ sources:
     cookie_file: /path/to/bilibili_cookies.txt
 ```
 
-方式 3：用环境变量临时注入
+方式 3：用环境变量指定 `cookie.txt` 路径
+
+```bash
+export BILIBILI_COOKIE_FILE=/path/to/bilibili_cookies.txt
+```
+
+下载阶段会直接把这个文件交给 `yt-dlp`。
+
+方式 4：用环境变量临时注入整串 cookie
 
 ```bash
 export BILIBILI_COOKIE='你的完整 cookie'

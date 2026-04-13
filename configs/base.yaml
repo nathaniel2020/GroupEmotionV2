@@ -15,8 +15,9 @@ sources:
   default: bilibili
   bilibili:
     enabled: true
-    cookie_env: 
-    cookie_file: "/Users/aidan/Downloads/bilibili_cookies.txt"
+    cookie_env: BILIBILI_COOKIE
+    cookie_file:
+    cookie_file_env: BILIBILI_COOKIE_FILE
     cookies_from_browser:
     max_pages_per_query: 2
     max_items_per_query: 5

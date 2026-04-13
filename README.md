@@ -297,7 +297,8 @@ crawl:
 - `crawl.retry.max_attempts`：B 站 412 / 429 / timeout 等瞬时错误的最大尝试次数
 - `crawl.retry.base_sleep_sec` / `max_sleep_sec` / `backoff_factor` / `jitter_sec`：失败后的退避 sleep 策略
 - `sources.bilibili.cookie_env`：从环境变量读取 B 站 cookie，默认读取 `BILIBILI_COOKIE`
-- `sources.bilibili.cookie_file`：读取现成的 `cookies.txt` / JSON cookie 导出文件，过滤出 B 站相关 cookie 后再生成临时 Netscape `cookiefile`，适合无桌面服务器
+- `sources.bilibili.cookie_file`：直接把现成的 `cookies.txt` 路径交给 `yt-dlp`
+- `sources.bilibili.cookie_file_env`：从环境变量读取 `cookie_file` 路径，默认读取 `BILIBILI_COOKIE_FILE`
 - `sources.bilibili.cookies_from_browser`：直接让 `yt-dlp` 从浏览器读取 cookie，格式与 `--cookies-from-browser` 一致，如 `chrome`、`chrome:/path/to/profile`
 - `service.download_loop.max_queries_per_cycle`：每个 loop 最多消费多少 query
 - `service.download_loop.max_queries_per_cycle: 0`：表示不限制，当前能跑多少就跑多少
@@ -332,7 +333,7 @@ crawl:
 - 降低 `crawl.download.max_inflight_per_host`
 - 增大 `crawl.retry.base_sleep_sec`
 
-如果需要带登录态抓取，不要把明文 cookie 提交进 Git。当前代码会自动读取环境变量：
+如果需要带登录态抓取，不要把明文 cookie 提交进 Git。临时注入整串 cookie 仍然支持：
 
 ```bash
 export BILIBILI_COOKIE='你的完整 cookie'
@@ -341,7 +342,7 @@ python scripts/run_pipeline.py --config configs/profiles/continuous_vllm_pipelin
 
 程序内部会把这串 cookie 注入 `requests` 的 cookie jar，并为 `yt-dlp` 生成临时 `cookiefile`，不再把 cookie 作为普通请求头透传。
 
-如果你在无桌面服务器上运行，更推荐直接提供现成的 `cookies.txt` 文件：
+如果你已经有现成的 `cookie.txt` / `cookies.txt`，现在可以直接给路径，不再做额外转换：
 
 ```yaml
 sources:
@@ -349,7 +350,16 @@ sources:
     cookie_file: /path/to/bilibili_cookies.txt
 ```
 
-这时下载阶段会先过滤出 B 站相关 cookie，再生成干净的临时 `cookiefile` 交给 `yt-dlp`。原文件里混入的其他站点 cookie 或坏行会被忽略。
+或者直接用环境变量指定路径：
+
+```bash
+export BILIBILI_COOKIE_FILE=/path/to/bilibili_cookies.txt
+python scripts/run_pipeline.py --config configs/profiles/continuous_vllm_pipeline.yaml download-loop
+```
+
+下载阶段会把这个文件路径原样交给 `yt-dlp`。`requests` 查询阶段如果需要复用 cookie，会单独从文件里解析出 B 站相关条目注入 session。
+
+如果你就是想无 cookie 下载，保持 `cookie_file` 为空，并且不要导出 `BILIBILI_COOKIE_FILE` / `BILIBILI_COOKIE` 即可。
 
 如果你本机已经登录过 Chrome / Chromium，更推荐直接在配置里写：
 
@@ -370,8 +380,9 @@ sources:
 优先级如下：
 
 - 配了 `sources.bilibili.cookies_from_browser`：优先用浏览器 cookie
-- 否则如果配了 `sources.bilibili.cookie_file`：直接用现成 `cookies.txt`
+- 否则如果配了 `sources.bilibili.cookie_file` 或导出了 `BILIBILI_COOKIE_FILE`：直接用现成 `cookies.txt`
 - 否则回退到 `BILIBILI_COOKIE` / 自动生成的临时 `cookiefile`
+- 否则无 cookie 下载
 
 ## `status` 解读
 

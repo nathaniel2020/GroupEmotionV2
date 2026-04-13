@@ -183,7 +183,11 @@ class BilibiliAdapter:
         inline_cookie = str(self.source_cfg.get("cookie") or "").strip()
         if inline_cookie:
             return inline_cookie
-        env_name = str(self.source_cfg.get("cookie_env") or "BILIBILI_COOKIE").strip()
+        raw_env_name = self.source_cfg.get("cookie_env")
+        if raw_env_name is None:
+            env_name = "BILIBILI_COOKIE"
+        else:
+            env_name = str(raw_env_name).strip()
         if not env_name:
             return None
         env_cookie = str(os.getenv(env_name) or "").strip()
@@ -191,7 +195,17 @@ class BilibiliAdapter:
 
     def _configured_cookie_file_source(self) -> str | None:
         raw_path = str(self.source_cfg.get("cookie_file") or "").strip()
-        return raw_path or None
+        if raw_path:
+            return os.path.expanduser(raw_path)
+        raw_env_name = self.source_cfg.get("cookie_file_env")
+        if raw_env_name is None:
+            env_name = "BILIBILI_COOKIE_FILE"
+        else:
+            env_name = str(raw_env_name).strip()
+        if not env_name:
+            return None
+        env_path = str(os.getenv(env_name) or "").strip()
+        return os.path.expanduser(env_path) if env_path else None
 
     @staticmethod
     def _is_bilibili_cookie_domain(domain: str | None) -> bool:
@@ -430,9 +444,14 @@ class BilibiliAdapter:
             return self._cookie_file_path
 
     def _ensure_cookie_file(self) -> str | None:
-        configured_cookies = self._configured_cookie_entries()
-        if configured_cookies:
-            return self._write_cookie_file(configured_cookies)
+        configured_cookie_file = self._configured_cookie_file_source()
+        if configured_cookie_file:
+            path = Path(configured_cookie_file)
+            if path.is_file() and os.access(path, os.R_OK):
+                return str(path)
+            if self.logger:
+                self.logger.warning("cookie_file_unreadable path=%s error=not_readable", str(path))
+            return None
         pairs = self._cookie_pairs()
         if not pairs:
             return None
