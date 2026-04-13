@@ -30,6 +30,52 @@ pip install -e .
 - 机器 1：`configs/profiles/shards/continuous_vllm_machine_1.yaml`
 - 机器 2：`configs/profiles/shards/continuous_vllm_machine_2.yaml`
 
+如果需要带登录态抓取，还要先确认 cookie 配置。
+
+当前 `configs/base.yaml` 里默认写了：
+
+- `sources.bilibili.cookie_file: "/Users/aidan/Downloads/bilibili_cookies.txt"`
+
+这个路径只是本机示例，不保证 3 台机器上都存在。每台机器都要改成自己本地真实可读的路径，或者改成下面别的方式。
+
+推荐优先级：
+
+- 已登录桌面浏览器：`sources.bilibili.cookies_from_browser`
+- 无桌面服务器：`sources.bilibili.cookie_file`
+- 临时测试：环境变量 `BILIBILI_COOKIE`
+
+方式 1：直接从浏览器读取 cookie
+
+```yaml
+sources:
+  bilibili:
+    cookies_from_browser: chrome
+```
+
+如果要显式指定 profile 目录：
+
+```yaml
+sources:
+  bilibili:
+    cookies_from_browser: chrome:~/.config/google-chrome
+```
+
+方式 2：提供现成的 `cookies.txt` / JSON cookie 导出文件
+
+```yaml
+sources:
+  bilibili:
+    cookie_file: /path/to/bilibili_cookies.txt
+```
+
+方式 3：用环境变量临时注入
+
+```bash
+export BILIBILI_COOKIE='你的完整 cookie'
+```
+
+不要把明文 cookie 提交进 Git。
+
 ## 2. 每台机器准备 reference
 
 如果 3 台机器上都已经有这两个源文件：
