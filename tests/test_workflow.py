@@ -96,6 +96,14 @@ class CyclingFakeBilibiliAdapter(FakeBilibiliAdapter):
         ][:limit]
 
 
+class FailingEnrichFakeBilibiliAdapter(FakeBilibiliAdapter):
+    def enrich(self, candidate: CandidateVideo):
+        raise Exception("ERROR: [BiliBili] BV1cZ421g7RQ: No video formats found!")
+
+    def _format_download_error(self, exc: Exception) -> str:
+        return f"formatted::{exc}"
+
+
 class FakeAnnotator:
     def annotate(self, clip_record):
         final_annotation = {
@@ -283,6 +291,102 @@ def test_workflow_end_to_end_offline(tmp_path: Path) -> None:
     assert status["projection_5d"]["workers"] == {"download": 2, "preprocess": 1, "annotate": 2}
     assert status["projection_5d"]["yield_assumptions"]["accepted_clips_per_processed_video"] == 1.0
     assert status["projection_5d"]["yield_assumptions"]["done_rate_after_annotation"] == 1.0
+
+
+def test_workflow_crawl_survives_enrich_failure_and_marks_rejection(tmp_path: Path) -> None:
+    excel_path = tmp_path / "原子情感因素.xlsx"
+    schema_path = tmp_path / "schema.json"
+    label_seed_path = tmp_path / "labels.json"
+    _write_seed_excel(excel_path)
+    _write_schema_json(schema_path)
+    label_seed_path.write_text(json.dumps({"labels": ["Joy", "Anxiety"]}, ensure_ascii=False), encoding="utf-8")
+
+    config = {
+        "project": {
+            "name": "test_project",
+            "root_dir": str(tmp_path),
+            "data_dir": "data",
+            "runtime_dir": "runtime",
+            "reference_dir": "data/reference",
+            "query_seed_catalog_path": "data/reference/query_seed_catalog.json",
+            "annotation_domains_path": "data/reference/annotation_domains.json",
+            "query_seed_excel_path": str(excel_path),
+            "query_seed_sheet_name": "情感因素",
+            "annotation_schema_source_path": str(schema_path),
+            "group_emotion_label_seed_path": str(label_seed_path),
+        },
+        "sources": {
+            "default": "bilibili",
+            "bilibili": {"enabled": True, "max_pages_per_query": 1, "max_items_per_query": 3},
+        },
+        "crawl": {
+            "max_queries_per_run": 10,
+            "min_duration_sec": 15,
+            "max_duration_sec": 1200,
+            "max_video_size_mb": 300,
+            "enrich_workers": 1,
+            "max_items_per_query": 3,
+            "download": {"enabled": True, "workers": 2, "max_inflight_per_host": 2, "retries": 1, "fragment_retries": 1, "socket_timeout_sec": 10},
+        },
+        "preprocessing": {
+            "max_videos_per_run": 5,
+            "workers": 1,
+            "prefer_subtitles": True,
+            "fixed_window_sec": 12,
+            "overlap_sec": 2,
+            "subtitle_target_min_sec": 8,
+            "subtitle_target_max_sec": 15,
+            "min_clip_duration_sec": 4,
+            "max_clip_duration_sec": 20,
+            "clip_export_mode": "copy",
+            "keyframe_count": 2,
+            "use_llm_filter": False,
+            "duplicate_overlap_threshold": 0.8,
+        },
+        "annotation": {"max_clips_per_run": 10, "clip_workers": 2, "min_overall_confidence": 0.6, "export_requires_review_clear": False},
+        "llm": {
+            "enabled": False,
+            "base_url": "https://yunwu.ai/v1/",
+            "api_key_env": "YUNWU_API_KEY",
+            "model": "gemini-3.1-pro-preview",
+            "timeout_sec": 30,
+            "temperature": 0.1,
+            "max_images_per_prompt": 2,
+            "parallel": {"enabled": True, "max_inflight_requests": 2, "acquire_timeout_sec": 30},
+        },
+        "service": {
+            "download_loop": {"max_queries_per_cycle": 10, "poll_interval_sec": 0.01, "idle_sleep_sec": 0.01, "max_cycles": 0, "stop_when_idle": True},
+            "pipeline_loop": {
+                "preprocess_claim_limit": 1,
+                "annotation_trigger_size": 1,
+                "annotation_batch_size": 1,
+                "annotation_trigger_timeout_sec": 0,
+                "queue_max_clips": 8,
+                "poll_interval_sec": 0.01,
+                "idle_sleep_sec": 0.01,
+                "max_cycles": 0,
+                "stop_when_idle": True,
+            },
+        },
+    }
+
+    workflow = Workflow(config, adapter=FailingEnrichFakeBilibiliAdapter(), annotator=FakeAnnotator())
+    workflow.prepare_reference()
+    assert workflow.seed_queries() == 3
+
+    processed = workflow.crawl()
+    status = workflow.status()
+    row = workflow.db.fetchone("SELECT download_status, reject_reason, raw_video_path FROM videos WHERE bvid=?", ("BV_TEST_001",))
+
+    assert processed == 1
+    assert row is not None
+    assert row["download_status"] == "rejected"
+    assert row["reject_reason"] == "formatted::ERROR: [BiliBili] BV1cZ421g7RQ: No video formats found!"
+    assert row["raw_video_path"] is None
+    assert status["queries"] == {"total": 3, "pending": 0, "retry": 0, "done": 3}
+    assert status["videos"]["total"] == 1
+    assert status["videos"]["downloaded"] == 0
+    assert status["videos"]["pending_preprocess"] == 0
 
 
 def test_prepare_reference_accepts_manual_input_paths_from_cli(tmp_path: Path, capsys) -> None:

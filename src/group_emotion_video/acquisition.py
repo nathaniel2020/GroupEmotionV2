@@ -1024,6 +1024,15 @@ class AcquisitionService:
         finished_at = datetime.now().isoformat(timespec="seconds")
         return result, started_at, finished_at, elapsed_sec
 
+    def _format_enrich_error(self, exc: Exception) -> str:
+        formatter = getattr(self.adapter, "_format_download_error", None)
+        if callable(formatter):
+            try:
+                return str(formatter(exc))
+            except Exception:
+                pass
+        return _strip_ansi(str(exc).strip())
+
     def crawl(self, limit: int | None = None) -> int:
         cycle_stats = self._new_crawl_stats()
         pending_queries = self.query_repo.list_pending(limit if limit is not None else int(self.config["crawl"]["max_queries_per_run"]))
@@ -1053,7 +1062,35 @@ class AcquisitionService:
                         continue
                     futures[executor.submit(self.adapter.enrich, candidate)] = candidate.platform_video_id
                 for future in as_completed(futures):
-                    enriched = future.result()
+                    original_bvid = futures[future]
+                    try:
+                        enriched = future.result()
+                    except Exception as exc:
+                        candidate = next(
+                            (item for item in candidates if item.platform_video_id == original_bvid),
+                            None,
+                        )
+                        if candidate is None:
+                            raise
+                        reject_reason = self._format_enrich_error(exc) or "enrich_failed"
+                        video_uid = make_video_uid(candidate.platform, candidate.platform_video_id)
+                        payload = self._serialize_video_meta(
+                            candidate,
+                            query=query,
+                            video_uid=video_uid,
+                            download_status="rejected",
+                            reject_reason=reject_reason,
+                            retention_status="rejected_deleted",
+                        )
+                        video_meta_path = self._write_video_meta(payload, video_uid=video_uid)
+                        self._write_video_rejection(payload, video_uid=video_uid)
+                        self.video_repo.upsert({**payload, "video_meta_path": str(video_meta_path)})
+                        self.video_repo.add_download_event(video_uid, "rejected", error_message=reject_reason)
+                        rejected_before_download += 1
+                        processed += 1
+                        if self.logger:
+                            self.logger.exception("enrich_failed bvid=%s error=%s", candidate.platform_video_id, reject_reason)
+                        continue
                     reason = self._reject_reason(enriched)
                     video_uid = make_video_uid(enriched.platform, enriched.platform_video_id)
                     if reason:
