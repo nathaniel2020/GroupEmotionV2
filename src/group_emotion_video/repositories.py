@@ -123,9 +123,19 @@ class QueryRepository:
         row = self.db.fetchone("SELECT COUNT(*) AS count FROM queries")
         return int(row["count"]) if row else 0
 
-    def summary(self) -> dict[str, int]:
-        rows = self.db.fetchall("SELECT status, COUNT(*) AS count FROM queries GROUP BY status")
+    def summary(self, *, owned_only: bool = False) -> dict[str, int]:
         summary = {"total": 0, "pending": 0, "retry": 0, "done": 0}
+        if owned_only and self.shard_count > 1:
+            rows = self.db.fetchall("SELECT query_id, status FROM queries")
+            for row in rows:
+                query_id = str(row["query_id"])
+                if not self.owns_query_id(query_id):
+                    continue
+                status = str(row["status"])
+                summary["total"] += 1
+                summary[status] = summary.get(status, 0) + 1
+            return summary
+        rows = self.db.fetchall("SELECT status, COUNT(*) AS count FROM queries GROUP BY status")
         for row in rows:
             status = str(row["status"])
             count = int(row["count"])

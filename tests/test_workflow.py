@@ -1282,6 +1282,133 @@ def test_query_shard_only_seeds_owned_queries(tmp_path: Path) -> None:
     assert all(workflow1.query_repo.owns_query_id(query_id) for query_id in shard1_query_ids)
 
 
+def test_download_loop_uses_owned_query_summary_for_refill_and_status(tmp_path: Path) -> None:
+    excel_path = tmp_path / "原子情感因素.xlsx"
+    schema_path = tmp_path / "schema.json"
+    label_seed_path = tmp_path / "labels.json"
+    _write_seed_excel(excel_path)
+    _write_schema_json(schema_path)
+    label_seed_path.write_text(json.dumps({"labels": ["Joy", "Anxiety"]}, ensure_ascii=False), encoding="utf-8")
+
+    config = {
+        "project": {
+            "name": "test_project",
+            "root_dir": str(tmp_path),
+            "data_dir": "data",
+            "runtime_dir": "runtime",
+            "reference_dir": "data/reference",
+            "query_seed_catalog_path": "data/reference/query_seed_catalog.json",
+            "annotation_domains_path": "data/reference/annotation_domains.json",
+            "query_seed_excel_path": str(excel_path),
+            "query_seed_sheet_name": "情感因素",
+            "annotation_schema_source_path": str(schema_path),
+            "group_emotion_label_seed_path": str(label_seed_path),
+        },
+        "sources": {
+            "default": "bilibili",
+            "bilibili": {"enabled": True, "max_pages_per_query": 1, "max_items_per_query": 3},
+        },
+        "crawl": {
+            "max_queries_per_run": 10,
+            "min_duration_sec": 15,
+            "max_duration_sec": 1200,
+            "max_video_size_mb": 300,
+            "enrich_workers": 1,
+            "max_items_per_query": 3,
+            "query_shard": {"count": 2, "index": 0},
+            "download": {"enabled": True, "workers": 1, "max_inflight_per_host": 1, "retries": 1, "fragment_retries": 1, "socket_timeout_sec": 10},
+        },
+        "preprocessing": {
+            "max_videos_per_run": 5,
+            "workers": 1,
+            "prefer_subtitles": True,
+            "fixed_window_sec": 12,
+            "overlap_sec": 2,
+            "subtitle_target_min_sec": 8,
+            "subtitle_target_max_sec": 15,
+            "min_clip_duration_sec": 4,
+            "max_clip_duration_sec": 20,
+            "clip_export_mode": "copy",
+            "keyframe_count": 2,
+            "use_llm_filter": False,
+            "duplicate_overlap_threshold": 0.8,
+        },
+        "annotation": {"max_clips_per_run": 10, "clip_workers": 2, "min_overall_confidence": 0.6, "export_requires_review_clear": False},
+        "llm": {
+            "enabled": False,
+            "base_url": "https://yunwu.ai/v1/",
+            "api_key_env": "YUNWU_API_KEY",
+            "model": "gemini-3.1-pro-preview",
+            "timeout_sec": 30,
+            "temperature": 0.1,
+            "max_images_per_prompt": 2,
+            "parallel": {"enabled": True, "max_inflight_requests": 2, "acquire_timeout_sec": 30},
+        },
+        "service": {
+            "download_loop": {
+                "max_queries_per_cycle": 1,
+                "auto_seed_if_empty": False,
+                "auto_refill_done_queries": True,
+                "refill_batch_size": 1,
+                "query_recycle_cooldown_sec": 0,
+                "max_runs_per_query": 0,
+                "poll_interval_sec": 0.01,
+                "idle_sleep_sec": 0.01,
+                "max_cycles": 1,
+                "stop_when_idle": False,
+            }
+        },
+    }
+
+    workflow = Workflow(config, adapter=FakeBilibiliAdapter(), annotator=FakeAnnotator())
+    workflow.prepare_reference()
+
+    owned_queries: list[str] = []
+    foreign_queries: list[str] = []
+    excel_row = 1
+    candidate_index = 1
+    while len(owned_queries) < 2 or len(foreign_queries) < 2:
+        seed_id = f"seed_{candidate_index}"
+        scene_text = f"场景{candidate_index}"
+        trigger_text = f"触发{candidate_index}"
+        query_text = f"{scene_text} {trigger_text}"
+        query_id = make_query_id(seed_id, query_text)
+        owns_query = workflow.query_repo.owns_query_id(query_id)
+        if owns_query and len(owned_queries) >= 2:
+            candidate_index += 1
+            continue
+        if (not owns_query) and len(foreign_queries) >= 2:
+            candidate_index += 1
+            continue
+        workflow.query_repo.upsert(
+            {
+                "query_id": query_id,
+                "seed_id": seed_id,
+                "excel_row": excel_row,
+                "scene_text": scene_text,
+                "trigger_text": trigger_text,
+                "query_text": query_text,
+                "status": "done" if owns_query else "pending",
+                "last_run_at": "2026-04-13T00:00:00" if owns_query else None,
+                "hit_count": 1 if owns_query else 0,
+                "run_count": 1 if owns_query else 0,
+            }
+        )
+        if owns_query:
+            owned_queries.append(query_id)
+        else:
+            foreign_queries.append(query_id)
+        excel_row += 1
+        candidate_index += 1
+
+    status = workflow.download_loop()
+    crawl_stats = workflow.acquisition.last_crawl_stats()
+
+    assert crawl_stats["query_count"] == 1
+    assert status["queries"] == {"total": 2, "pending": 0, "retry": 0, "done": 2}
+    assert status["videos"]["downloaded"] == 1
+
+
 def test_video_shard_prevents_same_bvid_from_downloading_on_both_machines(tmp_path: Path) -> None:
     reference_dir = tmp_path / "data" / "reference"
     reference_dir.mkdir(parents=True, exist_ok=True)

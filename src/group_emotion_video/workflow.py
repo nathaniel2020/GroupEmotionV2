@@ -220,8 +220,16 @@ class Workflow:
         export_dir = ExportService(layout=self.layout, logger=self.logger).export(rows, annotation_domains_path)
         return str(export_dir)
 
+    def _query_summary(self, *, owned_only: bool = True) -> dict[str, Any]:
+        if not hasattr(self.query_repo, "summary"):
+            return {"total": self.query_repo.count()}
+        try:
+            return self.query_repo.summary(owned_only=owned_only)
+        except TypeError:
+            return self.query_repo.summary()
+
     def status(self) -> dict[str, Any]:
-        query_summary = self.query_repo.summary() if hasattr(self.query_repo, "summary") else {"total": self.query_repo.count()}
+        query_summary = self._query_summary(owned_only=True)
         video_summary = self.video_repo.summary()
         clip_summary = self.clip_repo.summary()
         annotation_summary = self.annotation_repo.summary()
@@ -415,10 +423,10 @@ class Workflow:
 
     def _ensure_queries_available(self, cfg: dict[str, Any]) -> dict[str, Any]:
         info = {"auto_seeded_queries": 0, "recycled_queries": 0}
-        query_summary = self.query_repo.summary()
+        query_summary = self._query_summary(owned_only=True)
         if int(query_summary.get("total", 0)) == 0 and bool(cfg.get("auto_seed_if_empty", False)):
             info["auto_seeded_queries"] = int(self.seed_queries())
-            query_summary = self.query_repo.summary()
+            query_summary = self._query_summary(owned_only=True)
         if int(query_summary.get("pending", 0)) + int(query_summary.get("retry", 0)) > 0:
             return info
         if not bool(cfg.get("auto_refill_done_queries", False)):
