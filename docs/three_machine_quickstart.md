@@ -81,6 +81,32 @@ export BILIBILI_COOKIE='你的完整 cookie'
 
 不要把明文 cookie 提交进 Git。
 
+如果下载日志里出现：
+
+```text
+ERROR: [BiliBili] ... No video formats found!
+```
+
+优先按下面顺序排查：
+
+1. 在出错机器上确认 `yt-dlp` 版本，不要只看本地开发机。
+
+```bash
+python -m yt_dlp --version
+```
+
+如果版本明显偏旧，先升级：
+
+```bash
+python -m pip install -U yt-dlp
+```
+
+2. 确认这台机器真的带上了可用登录态。三机环境里最常见的问题不是“代码没配 cookie”，而是某一台机器实际读不到 cookie，最后退化成无 cookie 下载。
+3. 桌面机器优先用 `sources.bilibili.cookies_from_browser`；无桌面浏览器的服务器优先用 `sources.bilibili.cookie_file` 或 `BILIBILI_COOKIE_FILE`，不要指望 `cookies_from_browser` 在纯服务器环境稳定工作。
+4. 用同一个账号在浏览器里手动打开对应视频；如果浏览器里这个账号都看不了，流水线也拿不到可下载格式。
+
+这类报错通常不是“网络超时”，而是“页面打开了，但 B 站没有向当前会话暴露可播放流”。
+
 ## 2. 每台机器准备 reference
 
 如果 3 台机器上都已经有这两个源文件：

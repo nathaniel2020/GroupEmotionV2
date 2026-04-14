@@ -48,6 +48,7 @@
 - 已扩展 `AnnotationRepository.summary()`：`status["annotations"]` 现在会返回 `top_quality_flags`，便于直接判断 `failed` 是死在 `schema_invalid_enum`、`low_confidence` 还是其他校验。
 - 已确认 `VideoRepository.summary()` 里 `downloading` 统计条件此前写错成了 `download_status='downloaded'`；实际下载中记录写的是 `download_status='downloading'`，这会导致 `download-loop` 日志长期显示 `downloading: 0`。
 - 已把 `download-loop` 快照改成下载侧专用视图，不再混入 `clips/annotations` 与预处理/标注均时；同时为 `crawl()` 增加单 query 摘要日志，直接区分“真下载慢”和“重复命中旧视频导致空转”。
+- 已把 `ERROR: [BiliBili] ... No video formats found!` 归一化为可操作错误：现在会附带 `cookie_source`、本机 `yt_dlp_version` 和 cookie 配置提示，便于区分“提取器过旧”和“某台机器实际没有带上登录态”。
 
 ## Known Gaps
 

@@ -118,6 +118,15 @@
   - 基于当前代码判断，accepted 全 0 更像是“query 漂移 + L2 过严”叠加，而不只是下载阶段单点故障。
   - 调整 `build_search_query()`，让纯场景 query 自动携带 trigger 约束，减少宽召回。
   - 调整 `_l2_filter()`，把字幕与 title/description/tags/scene/trigger 联合用于 group/emotion 判断。
+
+### Phase 10.1: Bilibili Download Diagnostics
+- **Status:** complete
+- Actions taken:
+  - 复查 `acquisition.py` 的 `yt-dlp` 调用链，确认 `sources.bilibili.cookies_from_browser`、`cookie_file` 和 `BILIBILI_COOKIE_FILE` 都已接入，但此前下载失败时只透传原始异常。
+  - 为 `No video formats found` 增加归一化错误信息，附带 `cookie_source`、本机 `yt_dlp_version` 和明确的 cookie 配置建议。
+  - 为完全无 cookie 的 B 站下载增加一次性 warning，避免某台机器 silent fallback 成无登录态抓取。
+  - 更新 `docs/three_machine_quickstart.md`，补充三机环境下的 `No video formats found` 排障步骤。
+  - 执行 `python3 -m pytest -q tests/test_acquisition.py`，结果 `15 passed`。
   - 为 `status["clips"]` 增加 `top_rejection_reasons`，让线上运行能直接看到 rejection 分布。
   - 执行 `python3 -m pytest -q tests/test_acquisition.py tests/test_preprocessing.py`。
   - 执行 `python3 -m pytest -q`，`21 passed`。
