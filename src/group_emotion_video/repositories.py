@@ -338,17 +338,24 @@ class VideoRepository:
             (video_uid,),
         )
 
-    def list_exportable(self) -> list[dict[str, Any]]:
-        rows = self.db.fetchall(
-            """
+    def list_exportable(self, limit: int | None = None) -> list[dict[str, Any]]:
+        if limit is not None and int(limit) < 0:
+            raise ValueError("export limit must be >= 0")
+        if limit is not None and int(limit) == 0:
+            return []
+        sql = """
             SELECT a.*, c.video_uid, c.clip_path, c.manifest_path, v.video_meta_path
             FROM annotations a
             JOIN clips c ON c.clip_uid=a.clip_uid
             JOIN videos v ON v.video_uid=c.video_uid
             WHERE a.status='done'
             ORDER BY a.annotation_uid
-            """
-        )
+        """
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            sql = f"{sql}\nLIMIT ?"
+            params = (int(limit),)
+        rows = self.db.fetchall(sql, params)
         return [dict(row) for row in rows]
 
     def update_video_cleanup(

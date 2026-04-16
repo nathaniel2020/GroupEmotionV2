@@ -49,8 +49,26 @@
 - 已确认 `VideoRepository.summary()` 里 `downloading` 统计条件此前写错成了 `download_status='downloaded'`；实际下载中记录写的是 `download_status='downloading'`，这会导致 `download-loop` 日志长期显示 `downloading: 0`。
 - 已把 `download-loop` 快照改成下载侧专用视图，不再混入 `clips/annotations` 与预处理/标注均时；同时为 `crawl()` 增加单 query 摘要日志，直接区分“真下载慢”和“重复命中旧视频导致空转”。
 - 已把 `ERROR: [BiliBili] ... No video formats found!` 归一化为可操作错误：现在会附带 `cookie_source`、本机 `yt_dlp_version` 和 cookie 配置提示，便于区分“提取器过旧”和“某台机器实际没有带上登录态”。
+- 新的导出目标不是保留 runtime 原始工件，而是面向数据集消费方做二次整理：导出目录只保留 `clips/`、`annotations/`、`README.md`。
+- 单条导出标注文件将只保留三部分：`final_annotation`、`video_meta`、`clip_info`；其中 `video_meta` 会保留 `query_id / scene_text / trigger_text / source_excel_row` 这组溯源字段。
+- 当前真实 `annotation_domains.json` 中，`social_structure.ingroup_salience` 的类型是 `ordinal` 且无固定枚举，不应按测试桩中的 `none | low | high` 写死到导出说明。
+- 导出 README 已改为基于真实 `annotation_domains.json` 动态生成字段说明，因此后续 schema 变化会自动反映到 README，而不需要再手写同步一份字段文档。
+- 导出阶段现在支持 `export --limit N`，默认仍导出全部 `done` 样本；开启限制时，截断逻辑沿用当前 `annotations` 表的稳定排序。
+- `TC609-5-2025-04` 的说明文档维度只要求覆盖基本信息、内容特征、建设过程、应用说明四大块；说明文档达标并不等于整个数据集已完成高质量认定。
+- 当前本机可复核的数据口径需要拆成三层：设计参考资产、主标注快照、视频样例包；如果把三者混成一个“总样本数”，说明文档会失真。
+- 当前主标注快照位于 `/Users/aidan/Downloads/annotations`，共有 `31,185` 条 annotation JSON，约 `145 MB`。
+- 当前推荐直接用于训练/评测的 clean subset 口径是 `status=done` 且 `quality_flags` 为空，对应 `17,332` 条样本。
+- 当前 clean subset 已覆盖 `group_emotion` 冻结标签池中的 `44/50` 类，并覆盖全部 `8` 类 `trigger_event_type`、全部 `13` 类 `group_behavior_type`、全部 `3` 类 `behavior_sync` 和 `norm_context`。
+- 历史视频样例包 `simple_dataset_export_20260412_092729` 含 `200` 条 clip、`131` 条源视频，约 `1.19 GB`；`ffprobe` 抽检结果为 `199/200` 条可正常解析，存在 `1` 条坏包视频。
+- 已生成两份面向规范的文档：`docs/群体情感视频数据集说明文档.md` 与 `docs/群体情感视频数据集说明文档评测.md`。
+- 对外交付版说明文档不应出现仓库内部路径、命令行入口或日志文件级引用；这类信息应统一收敛为“由项目维护团队提供支持”。
+- 已将说明文档改写为 `20 万条 clip 级样本` 口径，未从服务器回填的统计项统一改为 `【待补充】` 占位符。
+- 已生成可直接交付的 Word 文档：`docs/群体情感视频数据集说明文档.docx`。
 
 ## Known Gaps
 
 - `group_emotion` 的冻结标签池目前是工程种子版，后续仍可能根据首批数据继续收敛。
 - 当前只在线跑通了 1 个 `done` 样本，样本规模还不足以评估整体召回和标注稳定性。
+- 当前尚未完成 `TC609-5-2025-04` 的数据质量维度和模型应用维度正式评分。
+- 当前主标注快照与视频样例包仍分散在不同路径，尚未收敛成同一份正式发布版目录。
+- 当前交付版说明文档中的多项规模与分布统计仍待服务器侧最终回填。

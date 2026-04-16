@@ -208,6 +208,7 @@ python scripts/run_pipeline.py crawl
 python scripts/run_pipeline.py preprocess
 python scripts/run_pipeline.py annotate
 python scripts/run_pipeline.py export
+python scripts/run_pipeline.py export --limit 1000
 python scripts/run_pipeline.py status
 ```
 
@@ -224,6 +225,20 @@ python scripts/run_pipeline.py run --steps prepare-reference,seed-queries,crawl,
 ```bash
 python scripts/run_pipeline.py --config configs/profiles/gemini_yunwu_smoke.yaml run --steps prepare-reference,seed-queries,crawl,preprocess,annotate
 ```
+
+`export` 会在 `runtime/exports/dataset_export_<timestamp>/` 下生成面向数据集消费的导出目录，根目录仅包含：
+
+- `clips/`
+- `annotations/`
+- `README.md`
+
+其中 `annotations/<clip_uid>.json` 每条数据只保留：
+
+- `final_annotation`
+- `video_meta`
+- `clip_info`
+
+如果只想导出前 N 条 `done` 样本，可以使用 `python scripts/run_pipeline.py export --limit N`。
 
 ## 双进程服务模式
 
@@ -408,6 +423,8 @@ sources:
 - `runtime/artifacts/annotations/`
 - `runtime/artifacts/rejections/`
 - `runtime/exports/`
+
+导出的数据集目录不会复制 runtime 原始工件；它只保留最终切片、精简后的标注 JSON 和导出说明 README。
 
 ## 当前实现范围
 

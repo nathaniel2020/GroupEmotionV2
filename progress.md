@@ -144,3 +144,55 @@
   - 新增回归测试，覆盖 in-flight 下载计数与 `download-loop` 日志口径。
   - 执行 `python3 -m pytest -q tests/test_workflow.py`，`12 passed`。
   - 执行 `python3 -m pytest -q`，`25 passed`。
+
+## Session: 2026-04-15
+
+### Phase 12: Dataset Export Reshape
+- **Status:** complete
+- Actions taken:
+  - 复查当前 `ExportService`、`Workflow.export()`、`VideoRepository.list_exportable()`，确认现状仍在复制 runtime 原始 `annotation/video_meta/clip_manifest` 工件。
+  - 与用户确认新的导出约束：导出目录只保留 `clips/`、`annotations/`、`README.md`，且单条标注文件只保留 `final_annotation`、`video_meta`、`clip_info`。
+  - 复查真实 `data/reference/annotation_domains.json`，确认 README 字段说明应以真实 schema 为准，而不是测试桩。
+  - 重写 `src/group_emotion_video/exporter.py`：导出时改为重组单条标注 JSON、生成导出目录 README，并删除旧的 `metadata/` 与 `manifest.json` 输出。
+  - 更新 `tests/test_workflow.py` 的离线 E2E 断言，锁定新导出目录结构、JSON 字段裁剪结果和 README 内容。
+  - 更新 `README.md` 与 `docs/轻量化重构方案.md`，同步新的导出目录结构和字段口径。
+  - 执行 `python3 -m pytest -q tests/test_workflow.py::test_workflow_end_to_end_offline`，通过。
+  - 执行 `python3 -m pytest -q`，`46 passed`。
+
+### Phase 12.1: Export Limit
+- **Status:** complete
+- Actions taken:
+  - 为 `VideoRepository.list_exportable()` 增加 `limit` 参数，并对负数做显式拒绝。
+  - 为 `Workflow.export()` 和 CLI `export` 子命令增加 `--limit` 支持。
+  - 新增 `test_workflow_export_respects_limit`，验证两条 `done` 样本下 `export(limit=1)` 只导出一条。
+  - 更新 `README.md` 与 `docs/轻量化重构方案.md` 的命令示例，补充 `export --limit N`。
+
+### Phase 13: Dataset Documentation & Documentation Evaluation
+- **Status:** complete
+- Actions taken:
+  - 研读 `docs/高质量数据集-质量评测规范.pdf`，提取说明文档维度的四个子指标及等权重评分方式。
+  - 复查 `data/reference/query_seed_catalog.json`、`data/reference/annotation_domains.json`、`configs/group_emotion_labels.seed.json`，明确设计口径为 `106` 条 seed、`302` 条 query、`22` 个字段、`50` 个群体情绪标签。
+  - 统计 `/Users/aidan/Downloads/annotations` 主标注快照，确认共有 `31,185` 条 annotation JSON，其中 clean subset 为 `17,332` 条。
+  - 统计 `/Users/aidan/Downloads/runtime 3/exports/simple_dataset_export_20260412_092729` 视频样例包，确认共有 `200` 条 clip、`131` 条源视频，`ffprobe` 复核 `199/200` 条可正常解析。
+  - 新增 `docs/群体情感视频数据集说明文档.md`，补齐基本信息、内容特征、建设过程、应用说明及统计口径来源。
+  - 新增 `docs/群体情感视频数据集说明文档评测.md`，按规范 `0101-0104` 四项子指标逐项映射并给出 `100.00` 分的说明文档评分。
+
+## Documentation / Audit Results
+
+| Item | Result |
+|------|--------|
+| 说明文档规范覆盖 | 基本信息 / 内容特征 / 建设过程 / 应用说明 | complete |
+| 说明文档评分 | `100.00 / 100.00` |
+| 主标注快照规模 | `31,185` 条 annotation JSON |
+| clean subset 规模 | `17,332` 条 |
+| 视频样例包规模 | `200` 条 clip / `131` 条源视频 |
+| 视频样例包媒体抽检 | `199/200` 可正常解析 |
+
+### Phase 14: Delivery-Ready Documentation Export
+- **Status:** complete
+- Actions taken:
+  - 重写 `docs/群体情感视频数据集说明文档.md`，将文档口径改为 `20 万条 clip 级样本`。
+  - 将无法当场核实的规模、分布、基准结果和联系人信息统一改为 `【待补充】` 占位符，便于服务器侧回填。
+  - 删除仓库内部路径、命令行入口、日志文件名和本地快照路径等不适合对外交付的表述。
+  - 通过 `python-docx` 生成 `docs/群体情感视频数据集说明文档.docx`。
+  - 复核导出结果，确认 Word 文件可正常读取，包含 `158` 个段落和 `15` 张表格。

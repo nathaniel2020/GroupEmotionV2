@@ -6,7 +6,7 @@ from pathlib import Path
 from openpyxl import Workbook
 
 from group_emotion_video.cli import main as cli_main
-from group_emotion_video.ids import make_query_id, make_seed_id
+from group_emotion_video.ids import make_annotation_uid, make_clip_uid, make_query_id, make_seed_id
 from group_emotion_video.ids import make_video_uid
 from group_emotion_video.legacy_runtime_import import LegacyRuntimeImporter
 from group_emotion_video.local_registry import LocalVideoRegistry
@@ -268,14 +268,42 @@ def test_workflow_end_to_end_offline(tmp_path: Path) -> None:
     export_dir = Path(workflow.export())
 
     assert export_dir.exists()
-    exported_videos = list((export_dir / "videos").glob("*.mp4"))
-    assert exported_videos
+    assert {path.name for path in export_dir.iterdir()} == {"README.md", "annotations", "clips"}
+    exported_clips = list((export_dir / "clips").glob("*.mp4"))
+    assert len(exported_clips) == 1
 
     tmp_videos = list((tmp_path / "runtime" / "tmp" / "videos").rglob("*.mp4"))
     assert not tmp_videos
 
-    annotation_domains_copy = export_dir / "metadata" / "annotation_domains.json"
-    assert annotation_domains_copy.exists()
+    annotation_files = list((export_dir / "annotations").glob("*.json"))
+    assert len(annotation_files) == 1
+    exported_annotation = json.loads(annotation_files[0].read_text(encoding="utf-8"))
+    expected_video_uid = make_video_uid("bilibili", "BV_TEST_001")
+    expected_clip_uid = make_clip_uid(expected_video_uid, 0.0, 10.0)
+    assert list(exported_annotation) == ["final_annotation", "video_meta", "clip_info"]
+    assert "agent_outputs" not in exported_annotation
+    assert exported_annotation["final_annotation"]["group_emotion"] == "Joy"
+    assert exported_annotation["video_meta"]["query_id"].startswith("query_")
+    assert exported_annotation["video_meta"]["scene_text"] == "封闭室内中空间（教室/会议室）"
+    assert exported_annotation["video_meta"]["trigger_text"] == "公开正面能力认可（当众表扬/荣誉称号/竞赛获奖/推荐提名）"
+    assert exported_annotation["video_meta"]["source_excel_row"] == 2
+    assert "download_status" not in exported_annotation["video_meta"]
+    assert exported_annotation["clip_info"] == {
+        "clip_uid": expected_clip_uid,
+        "video_uid": expected_video_uid,
+        "start_sec": 0.0,
+        "end_sec": 10.0,
+        "duration_sec": 10.0,
+        "segmentation_mode": "subtitle",
+        "clip_file": f"clips/{expected_clip_uid}.mp4",
+    }
+
+    export_readme = (export_dir / "README.md").read_text(encoding="utf-8")
+    assert "## 数据集介绍" in export_readme
+    assert "## 标注文件顶层结构" in export_readme
+    assert "## final_annotation 字段说明" in export_readme
+    assert "`query_id`" in export_readme
+    assert "`scene_description`" in export_readme
 
     assert status["queries"] == {"total": 3, "pending": 0, "retry": 0, "done": 3}
     assert status["videos"]["downloaded"] == 1
@@ -291,6 +319,286 @@ def test_workflow_end_to_end_offline(tmp_path: Path) -> None:
     assert status["projection_5d"]["workers"] == {"download": 2, "preprocess": 1, "annotate": 2}
     assert status["projection_5d"]["yield_assumptions"]["accepted_clips_per_processed_video"] == 1.0
     assert status["projection_5d"]["yield_assumptions"]["done_rate_after_annotation"] == 1.0
+
+
+def test_workflow_export_respects_limit(tmp_path: Path) -> None:
+    excel_path = tmp_path / "原子情感因素.xlsx"
+    schema_path = tmp_path / "schema.json"
+    label_seed_path = tmp_path / "labels.json"
+    _write_seed_excel(excel_path)
+    _write_schema_json(schema_path)
+    label_seed_path.write_text(json.dumps({"labels": ["Joy", "Anxiety"]}, ensure_ascii=False), encoding="utf-8")
+
+    config = {
+        "project": {
+            "name": "test_project",
+            "root_dir": str(tmp_path),
+            "data_dir": "data",
+            "runtime_dir": "runtime",
+            "reference_dir": "data/reference",
+            "query_seed_catalog_path": "data/reference/query_seed_catalog.json",
+            "annotation_domains_path": "data/reference/annotation_domains.json",
+            "query_seed_excel_path": str(excel_path),
+            "query_seed_sheet_name": "情感因素",
+            "annotation_schema_source_path": str(schema_path),
+            "group_emotion_label_seed_path": str(label_seed_path),
+        },
+        "sources": {
+            "default": "bilibili",
+            "bilibili": {"enabled": True, "max_pages_per_query": 1, "max_items_per_query": 3},
+        },
+        "crawl": {
+            "max_queries_per_run": 10,
+            "min_duration_sec": 15,
+            "max_duration_sec": 1200,
+            "max_video_size_mb": 300,
+            "enrich_workers": 1,
+            "max_items_per_query": 3,
+            "download": {"enabled": True, "workers": 2, "max_inflight_per_host": 2, "retries": 1, "fragment_retries": 1, "socket_timeout_sec": 10},
+        },
+        "preprocessing": {
+            "max_videos_per_run": 5,
+            "workers": 1,
+            "prefer_subtitles": True,
+            "fixed_window_sec": 12,
+            "overlap_sec": 2,
+            "subtitle_target_min_sec": 8,
+            "subtitle_target_max_sec": 15,
+            "min_clip_duration_sec": 4,
+            "max_clip_duration_sec": 20,
+            "clip_export_mode": "copy",
+            "keyframe_count": 2,
+            "use_llm_filter": False,
+            "duplicate_overlap_threshold": 0.8,
+        },
+        "annotation": {"max_clips_per_run": 10, "clip_workers": 2, "min_overall_confidence": 0.6, "export_requires_review_clear": False},
+        "llm": {
+            "enabled": False,
+            "base_url": "https://yunwu.ai/v1/",
+            "api_key_env": "YUNWU_API_KEY",
+            "model": "gemini-3.1-pro-preview",
+            "timeout_sec": 30,
+            "temperature": 0.1,
+            "max_images_per_prompt": 2,
+            "parallel": {"enabled": True, "max_inflight_requests": 2, "acquire_timeout_sec": 30},
+        },
+        "service": {
+            "download_loop": {"max_queries_per_cycle": 10, "poll_interval_sec": 0.01, "idle_sleep_sec": 0.01, "max_cycles": 0, "stop_when_idle": True},
+            "pipeline_loop": {
+                "preprocess_claim_limit": 1,
+                "annotation_trigger_size": 1,
+                "annotation_batch_size": 1,
+                "annotation_trigger_timeout_sec": 0,
+                "queue_max_clips": 8,
+                "poll_interval_sec": 0.01,
+                "idle_sleep_sec": 0.01,
+                "max_cycles": 0,
+                "stop_when_idle": True,
+            },
+        },
+    }
+
+    workflow = Workflow(config, adapter=FakeBilibiliAdapter(), annotator=FakeAnnotator())
+    workflow.prepare_reference()
+
+    sample_specs = [
+        {
+            "platform_video_id": "BV_TEST_LIMIT_001",
+            "start_sec": 0.0,
+            "end_sec": 10.0,
+            "query_id": "query_limit_1",
+            "scene_text": "教室",
+            "trigger_text": "表扬",
+            "source_excel_row": 1,
+        },
+        {
+            "platform_video_id": "BV_TEST_LIMIT_002",
+            "start_sec": 10.0,
+            "end_sec": 20.0,
+            "query_id": "query_limit_2",
+            "scene_text": "礼堂",
+            "trigger_text": "鼓掌",
+            "source_excel_row": 2,
+        },
+    ]
+
+    expected_clip_uids: list[str] = []
+    for idx, spec in enumerate(sample_specs, start=1):
+        video_uid = make_video_uid("bilibili", spec["platform_video_id"])
+        clip_uid = make_clip_uid(video_uid, spec["start_sec"], spec["end_sec"])
+        expected_clip_uids.append(clip_uid)
+
+        clip_dir = workflow.layout["artifact_clips"] / clip_uid
+        clip_dir.mkdir(parents=True, exist_ok=True)
+        clip_path = clip_dir / "clip.mp4"
+        clip_path.write_bytes(f"clip-{idx}".encode("utf-8"))
+
+        manifest_path = clip_dir / "clip_manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "clip_uid": clip_uid,
+                    "video_uid": video_uid,
+                    "start_sec": spec["start_sec"],
+                    "end_sec": spec["end_sec"],
+                    "duration_sec": spec["end_sec"] - spec["start_sec"],
+                    "segmentation_mode": "subtitle",
+                    "filter_status": "accepted",
+                    "filter_reasons": [],
+                    "artifact_paths": {"clip_path": str(clip_path)},
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        video_meta_path = workflow.layout["artifact_videos"] / video_uid / "video_meta.json"
+        video_meta_path.parent.mkdir(parents=True, exist_ok=True)
+        video_meta_path.write_text(
+            json.dumps(
+                {
+                    "video_uid": video_uid,
+                    "platform": "bilibili",
+                    "bvid": spec["platform_video_id"],
+                    "url": f"https://www.bilibili.com/video/{spec['platform_video_id']}",
+                    "webpage_url": f"https://www.bilibili.com/video/{spec['platform_video_id']}",
+                    "title": f"样本 {idx}",
+                    "uploader": "tester",
+                    "publish_time": "2026-04-15T00:00:00",
+                    "duration_sec": 30.0,
+                    "cover_url": None,
+                    "description": f"desc-{idx}",
+                    "tags": ["群体"],
+                    "categories": ["教育"],
+                    "view_count": idx,
+                    "like_count": idx,
+                    "comment_count": 0,
+                    "play_count": idx,
+                    "danmaku_count": 0,
+                    "type": "education",
+                    "subtitles_available": True,
+                    "query_id": spec["query_id"],
+                    "scene_text": spec["scene_text"],
+                    "trigger_text": spec["trigger_text"],
+                    "source_excel_row": spec["source_excel_row"],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        annotation_path = workflow.layout["artifact_annotations"] / f"{make_annotation_uid(clip_uid)}.json"
+        annotation_path.parent.mkdir(parents=True, exist_ok=True)
+        annotation_path.write_text(
+            json.dumps(
+                {
+                    "annotation_uid": make_annotation_uid(clip_uid),
+                    "clip_uid": clip_uid,
+                    "final_annotation": {
+                        "scene_description": f"scene-{idx}",
+                        "group_emotion": "Joy",
+                    },
+                    "status": "done",
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        workflow.video_repo.upsert(
+            {
+                "video_uid": video_uid,
+                "platform": "bilibili",
+                "bvid": spec["platform_video_id"],
+                "url": f"https://www.bilibili.com/video/{spec['platform_video_id']}",
+                "title": f"样本 {idx}",
+                "uploader": "tester",
+                "publish_time": "2026-04-15T00:00:00",
+                "duration_sec": 30.0,
+                "cover_url": None,
+                "description": f"desc-{idx}",
+                "tags": ["群体"],
+                "categories": ["教育"],
+                "view_count": idx,
+                "like_count": idx,
+                "comment_count": 0,
+                "play_count": idx,
+                "danmaku_count": 0,
+                "type": "education",
+                "webpage_url": f"https://www.bilibili.com/video/{spec['platform_video_id']}",
+                "query_id": spec["query_id"],
+                "scene_text": spec["scene_text"],
+                "trigger_text": spec["trigger_text"],
+                "source_excel_row": spec["source_excel_row"],
+                "subtitles_available": True,
+                "rights_status": "public",
+                "download_status": "downloaded",
+                "download_started_at": None,
+                "download_finished_at": None,
+                "download_elapsed_sec": None,
+                "reject_reason": None,
+                "retention_status": "processed_deleted",
+                "accepted_clip_count": 1,
+                "preprocess_started_at": None,
+                "preprocess_finished_at": None,
+                "preprocess_elapsed_sec": None,
+                "raw_video_path": None,
+                "video_meta_path": str(video_meta_path),
+                "platform_metadata": {},
+                "extra": {},
+            }
+        )
+        workflow.clip_repo.upsert(
+            {
+                "clip_uid": clip_uid,
+                "video_uid": video_uid,
+                "start_sec": spec["start_sec"],
+                "end_sec": spec["end_sec"],
+                "duration_sec": spec["end_sec"] - spec["start_sec"],
+                "segmentation_mode": "subtitle",
+                "filter_status": "accepted",
+                "filter_reasons": [],
+                "retention_status": "accepted_kept",
+                "clip_path": str(clip_path),
+                "manifest_path": str(manifest_path),
+                "keyframes_manifest_path": None,
+                "subtitle_path": None,
+                "scores": {},
+                "annotation_status": "done",
+            }
+        )
+        workflow.annotation_repo.upsert(
+            {
+                "annotation_uid": make_annotation_uid(clip_uid),
+                "clip_uid": clip_uid,
+                "status": "done",
+                "started_at": "2026-04-15T00:00:00",
+                "finished_at": "2026-04-15T00:00:01",
+                "elapsed_sec": 1.0,
+                "review_required": False,
+                "final_annotation": {"scene_description": f"scene-{idx}", "group_emotion": "Joy"},
+                "field_confidence": {"overall": 0.9},
+                "quality_flags": [],
+                "artifact_path": str(annotation_path),
+            }
+        )
+
+    assert len(workflow.video_repo.list_exportable()) == 2
+
+    export_dir = Path(workflow.export(limit=1))
+    exported_annotation_files = sorted((export_dir / "annotations").glob("*.json"))
+    exported_clip_files = sorted((export_dir / "clips").glob("*.mp4"))
+
+    assert len(exported_annotation_files) == 1
+    assert len(exported_clip_files) == 1
+
+    expected_first_clip_uid = min(expected_clip_uids, key=make_annotation_uid)
+    assert exported_annotation_files[0].stem == expected_first_clip_uid
+    assert exported_clip_files[0].stem == expected_first_clip_uid
+    assert "样本数量：`1`" in (export_dir / "README.md").read_text(encoding="utf-8")
 
 
 def test_workflow_crawl_survives_enrich_failure_and_marks_rejection(tmp_path: Path) -> None:

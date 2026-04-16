@@ -214,9 +214,9 @@ class Workflow:
         clips = self.video_repo.list_processed_clips_for_annotation(int(self.config["annotation"]["max_clips_per_run"]))
         return service.annotate(clips)
 
-    def export(self) -> str:
+    def export(self, *, limit: int | None = None) -> str:
         _, annotation_domains_path = self._require_reference()
-        rows = self.video_repo.list_exportable()
+        rows = self.video_repo.list_exportable(limit=limit)
         export_dir = ExportService(layout=self.layout, logger=self.logger).export(rows, annotation_domains_path)
         return str(export_dir)
 
