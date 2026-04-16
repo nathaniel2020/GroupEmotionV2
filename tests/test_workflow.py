@@ -268,7 +268,7 @@ def test_workflow_end_to_end_offline(tmp_path: Path) -> None:
     export_dir = Path(workflow.export())
 
     assert export_dir.exists()
-    assert {path.name for path in export_dir.iterdir()} == {"README.md", "annotations", "clips"}
+    assert {path.name for path in export_dir.iterdir()} == {"README.md", "annotations", "clips", "raw_annotations"}
     exported_clips = list((export_dir / "clips").glob("*.mp4"))
     assert len(exported_clips) == 1
 

@@ -102,8 +102,10 @@ class ExportService:
         export_dir = self.layout["exports"] / f"dataset_export_{stamp}"
         clips_dir = export_dir / "clips"
         annotations_dir = export_dir / "annotations"
+        raw_annotations_dir = export_dir / "raw_annotations"
         clips_dir.mkdir(parents=True, exist_ok=True)
         annotations_dir.mkdir(parents=True, exist_ok=True)
+        raw_annotations_dir.mkdir(parents=True, exist_ok=True)
 
         domains = self._load_json(annotation_domains_path)
         field_specs = domains.get("fields", {})
@@ -117,6 +119,7 @@ class ExportService:
 
             target_clip_path = clips_dir / f"{clip_uid}{clip_path.suffix or '.mp4'}"
             shutil.copy2(clip_path, target_clip_path)
+            shutil.copy2(row["artifact_path"], raw_annotations_dir / f"{clip_uid}.json")
 
             exported_annotation = {
                 "final_annotation": self._build_final_annotation(annotation_payload, field_specs),
