@@ -338,7 +338,12 @@ class VideoRepository:
             (video_uid,),
         )
 
-    def list_exportable(self, limit: int | None = None, min_confidence: float | None = None) -> list[dict[str, Any]]:
+    def list_exportable(
+        self,
+        limit: int | None = None,
+        min_confidence: float | None = None,
+        caps: dict[tuple[str, str], int] | None = None,
+    ) -> list[dict[str, Any]]:
         if limit is not None and int(limit) < 0:
             raise ValueError("export limit must be >= 0")
         if limit is not None and int(limit) == 0:
@@ -359,11 +364,31 @@ class VideoRepository:
             WHERE {where_clause}
             ORDER BY a.annotation_uid
         """
-        if limit is not None:
-            sql = f"{sql}\nLIMIT ?"
-            params.append(int(limit))
         rows = self.db.fetchall(sql, tuple(params))
-        return [dict(row) for row in rows]
+        result = self._apply_caps([dict(row) for row in rows], caps)
+        if limit is not None:
+            result = result[: int(limit)]
+        return result
+
+    @staticmethod
+    def _apply_caps(rows: list[dict[str, Any]], caps: dict[tuple[str, str], int] | None) -> list[dict[str, Any]]:
+        if not caps:
+            return rows
+        import json as _json
+        counters: dict[tuple[str, str], int] = {key: 0 for key in caps}
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            annotation = _json.loads(row.get("final_annotation_json") or "{}")
+            skip = False
+            for (field, value), max_count in caps.items():
+                if str(annotation.get(field, "")) == value:
+                    if counters[(field, value)] >= max_count:
+                        skip = True
+                        break
+                    counters[(field, value)] += 1
+            if not skip:
+                result.append(row)
+        return result
 
     def update_video_cleanup(
         self,

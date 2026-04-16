@@ -47,10 +47,27 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser = subparsers.add_parser("export")
     export_parser.add_argument("--limit", type=int, dest="limit")
     export_parser.add_argument("--min-confidence", type=float, dest="min_confidence")
+    export_parser.add_argument(
+        "--cap", action="append", dest="caps", default=[],
+        help="Cap samples per annotation value: field=value:max_count (repeatable)",
+    )
 
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--steps", required=True, help="Comma-separated steps")
     return parser
+
+
+def _parse_caps(raw: list[str]) -> dict[tuple[str, str], int]:
+    """Parse ``--cap field=value:count`` arguments into {(field, value): count}."""
+    caps: dict[tuple[str, str], int] = {}
+    for token in raw:
+        try:
+            field_value, count_str = token.rsplit(":", 1)
+            field, value = field_value.split("=", 1)
+        except ValueError:
+            raise SystemExit(f"Invalid --cap format '{token}', expected field=value:count")
+        caps[(field.strip(), value.strip())] = int(count_str)
+    return caps
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -99,7 +116,8 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "pipeline-loop":
         result = workflow.pipeline_loop()
     elif args.command == "export":
-        result = workflow.export(limit=args.limit, min_confidence=args.min_confidence)
+        caps = _parse_caps(args.caps)
+        result = workflow.export(limit=args.limit, min_confidence=args.min_confidence, caps=caps)
     elif args.command == "status":
         result = workflow.status()
     elif args.command == "run":
