@@ -20,7 +20,6 @@ VIDEO_META_FIELDS = [
     "cover_url",
     "description",
     "tags",
-    "categories",
     "view_count",
     "like_count",
     "comment_count",
@@ -36,7 +35,6 @@ VIDEO_META_FIELDS = [
 
 VIDEO_META_DEFAULTS = {
     "tags": [],
-    "categories": [],
     "subtitles_available": False,
 }
 
@@ -53,7 +51,6 @@ VIDEO_META_DESCRIPTIONS = {
     "cover_url": "封面图地址。",
     "description": "原始视频简介。",
     "tags": "原始标签列表。",
-    "categories": "原始分类列表。",
     "view_count": "播放/观看计数。",
     "like_count": "点赞计数。",
     "comment_count": "评论计数。",
