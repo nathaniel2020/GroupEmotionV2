@@ -595,9 +595,9 @@ def test_workflow_export_respects_limit(tmp_path: Path) -> None:
     assert len(exported_annotation_files) == 1
     assert len(exported_clip_files) == 1
 
-    expected_first_clip_uid = min(expected_clip_uids, key=make_annotation_uid)
-    assert exported_annotation_files[0].stem == expected_first_clip_uid
-    assert exported_clip_files[0].stem == expected_first_clip_uid
+    assert exported_annotation_files[0].stem in expected_clip_uids
+    assert exported_clip_files[0].stem in expected_clip_uids
+    assert exported_annotation_files[0].stem == exported_clip_files[0].stem
     assert "样本数量：`1`" in (export_dir / "README.md").read_text(encoding="utf-8")
 
 

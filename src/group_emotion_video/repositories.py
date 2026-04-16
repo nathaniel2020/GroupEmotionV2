@@ -365,7 +365,10 @@ class VideoRepository:
             ORDER BY a.annotation_uid
         """
         rows = self.db.fetchall(sql, tuple(params))
-        result = self._apply_caps([dict(row) for row in rows], caps)
+        all_rows = [dict(row) for row in rows]
+        import random
+        random.shuffle(all_rows)
+        result = self._apply_caps(all_rows, caps)
         if limit is not None:
             result = result[: int(limit)]
         return result
