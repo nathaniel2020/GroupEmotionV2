@@ -240,6 +240,16 @@ python scripts/run_pipeline.py --config configs/profiles/gemini_yunwu_smoke.yaml
 
 如果只想导出前 N 条 `done` 样本，可以使用 `python scripts/run_pipeline.py export --limit N`。
 
+也可以直接使用独立导出脚本，默认导出全部 `done` 样本：
+
+```bash
+python scripts/export_dataset.py
+python scripts/export_dataset.py --runtime-root runtime/continuous_pipeline
+python scripts/export_dataset.py --limit 1000
+```
+
+脚本默认在 stderr 显示导出进度条；后台运行或只想保留 JSON 输出时可加 `--no-progress`。
+
 ## 双进程服务模式
 
 推荐开两个终端。
