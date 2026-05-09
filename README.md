@@ -1,13 +1,13 @@
 # 群体情感视频轻量化流水线
 
-当前仓库已经按 `013.02` 方案落地为一条轻量但完整的生产链路：
+当前仓库按 `013.02` 方案落地为轻量但完整的生产链路。推荐运行方式是“双进程服务模式”：
 
-`prepare-reference -> seed-queries -> crawl -> preprocess -> annotate -> export`
+1. 先执行一次 `prepare-reference`
+2. 终端 1 常驻运行 `download-loop`
+3. 终端 2 常驻运行 `pipeline-loop`
+4. 需要交付数据集时再执行 `export`
 
-当前推荐的在线运行模式是两进程：
-
-- `download-loop`：单独负责 query 消费、B 站检索、enrich、下载，并持续打印下载日志
-- `pipeline-loop`：负责“预处理 -> accepted clip 队列 -> 并行标注”的联动流水线
+`download-loop` 负责 query 消费、B 站检索、enrich、下载；`pipeline-loop` 负责“预处理 -> accepted clip 队列 -> 并行标注”的联动流水线。
 
 核心约束：
 
@@ -113,184 +113,9 @@ python scripts/run_pipeline.py seed-queries
 - 当 `queries` 表为空时自动 `seed-queries`
 - 当 `pending/retry` 用完时，自动把满足冷却条件的 `done` query 回收成新的 `pending`
 
-## 本地视频入库
-
-如果你已经有一批本地视频，不想再走 `crawl/download`，可以直接把视频注册进 `runtime/.../index.sqlite`，后续就能直接调用 `preprocess` / `pipeline-loop`。
-
-如果来源是 `013.01` 的完整 runtime，优先使用下面这个专用命令，而不是通用的 `register-local-videos`。
-
-### 导入 `013.01` runtime
-
-专用导入命令：
-
-```bash
-python scripts/run_pipeline.py \
-  --config configs/profiles/continuous_vllm_pipeline.yaml \
-  import-01301-runtime \
-  --legacy-runtime-root /mnt/data_disk/home/liuhaoyu/GroupEmotion/runtime
-```
-
-默认行为：
-
-- 从 `/mnt/.../runtime/artifacts/raw_videos/bilibili` 扫描原始视频
-- 显示终端进度条
-- 按 `move` 语义把视频转移到当前 `013.02` runtime 的 `tmp/videos/...`
-- 优先尝试读取 `--legacy-runtime-root` 下的 `db/keyword_index.db` 和 `db/video_meta.db`
-- 恢复 `bilibili` / `BVID` / `url` / `title` / `query` 关联等元信息
-- 在当前 `runtime/.../index.sqlite` 中写成与 `013.02` 自己下载产物同一套状态机：`download_status='downloaded'`
-
-常用参数：
-
-- `--raw-root`：如果原始视频不在默认位置，手动指定扫描根目录
-- `--limit N`：先做小批量试跑
-- `--replace-existing`：覆盖已导入记录
-- `--no-progress`：关闭进度条
-
-导入后直接处理：
-
-```bash
-python scripts/run_pipeline.py \
-  --config configs/profiles/continuous_vllm_pipeline.yaml \
-  pipeline-loop
-```
-
-说明：
-
-- 这里不需要 `--tag 群体 --tag emotion`。
-- 那两个 `--tag` 只是给通用本地导入器补文本提示，帮助无字幕视频通过预处理的弱规则过滤，不属于规范导入流程。
-- 例如当你传入 `--legacy-runtime-root /mnt/data_disk/home/liuhaoyu/GroupEmotion/runtime` 时，导入器读取的是：
-  `/mnt/data_disk/home/liuhaoyu/GroupEmotion/runtime/db/keyword_index.db`
-  和
-  `/mnt/data_disk/home/liuhaoyu/GroupEmotion/runtime/db/video_meta.db`
-- 如果源目录和当前 runtime 不在同一个文件系统，底层无法做原子 `rename`；`move` 语义会退化成“复制成功后删除源文件”，这是操作系统限制，不是导入器绕过了 `move`。
-
-推荐先准备 reference，这样命令会优先用 `query_seed_catalog.json` 去匹配场景目录名：
-
-```bash
-python scripts/run_pipeline.py prepare-reference
-```
-
-如果你的目录组织类似 `013.01` 风格，例如：
-
-```text
-/path/to/local_batch/
-  教室/
-    xxx.mp4
-    yyy.mp4
-  演唱会现场/
-    zzz.mp4
-```
-
-可以直接执行：
-
-```bash
-python scripts/run_pipeline.py register-local-videos \
-  --config configs/profiles/continuous_vllm_pipeline.yaml \
-  --input-root /path/to/local_batch
-```
-
-这个命令会：
-
-- 递归扫描视频文件
-- 尝试用一级子目录名匹配 reference 里的 `scene_text`
-- 把原视频复制到当前 runtime 的 `tmp/videos/local_import/...`
-- 在 `runtime/.../index.sqlite` 的 `queries` / `videos` 表里补齐记录
-- 把这些视频标记为 `downloaded`，供 `preprocess` 或 `pipeline-loop` 继续消费
-
-如果你的文件都在一个平铺目录下，没有场景子目录，可以手动指定：
-
-```bash
-python scripts/run_pipeline.py register-local-videos \
-  --input-root /path/to/flat_videos \
-  --scene-text "教室" \
-  --trigger-text "公开正面能力认可" \
-  --tag 群体 \
-  --tag emotion
-```
-
-可选参数：
-
-- `--transfer-mode copy|hardlink|symlink|move`：默认 `copy`。建议保留默认值，避免后续预处理删除原始库里的文件。
-- `--replace-existing`：如果同一批本地视频之前已经注册过，用它覆盖旧记录并重新 staging。
-- `--default-duration-sec`：`ffprobe` 拿不到时用这个兜底。
-- `--tag ...`：会写入视频 tags。对没有字幕、文件名也缺少语义信息的本地视频，建议显式加上如 `群体`、`emotion` 这类提示词，避免预处理阶段被弱信号过滤。
-
-入库后可以直接跑：
-
-```bash
-python scripts/run_pipeline.py --config configs/profiles/continuous_vllm_pipeline.yaml preprocess
-python scripts/run_pipeline.py --config configs/profiles/continuous_vllm_pipeline.yaml annotate
-```
-
-或者直接让常驻流水线接管：
-
-```bash
-python scripts/run_pipeline.py \
-  --config configs/profiles/continuous_vllm_pipeline.yaml \
-  pipeline-loop
-```
-
-## 单阶段运行
-
-按阶段手动执行：
-
-```bash
-python scripts/run_pipeline.py crawl
-python scripts/run_pipeline.py preprocess
-python scripts/run_pipeline.py annotate
-python scripts/run_pipeline.py export
-python scripts/run_pipeline.py export --limit 1000
-python scripts/run_pipeline.py status
-python scripts/run_pipeline.py dataset-stats
-python scripts/run_pipeline.py review-list --status pending --limit 20
-python scripts/run_pipeline.py review-complete --review-uid review_xxx --annotation-json /path/to/reviewed_annotation.json --reviewer aidan
-```
-
-`status` 会输出 query / video / clip / annotation 的计数、下载/预处理/标注平均耗时，以及基于当前均值和 worker 配置的 `projection_5d` 估算。
-
-`dataset-stats` 会输出面向审计和回填文档的覆盖统计，包括场景、平台、触发事件、群体行为、群体情绪、clip 时长、整体置信度、质量标记、字段覆盖率，以及候选标注 / Judge / 人审 / lineage 的审计计数。
-
-`review-list` / `review-complete` 用于处理 `human_reviews` 待办。若 profile 设置 `annotation.export_requires_review_clear=true`，`export` 会跳过仍处于 `review_required=true` 的样本，直到复核完成。
-
-也可以一次串行执行：
-
-```bash
-python scripts/run_pipeline.py run --steps prepare-reference,seed-queries,crawl,preprocess,annotate,export,status
-```
-
-叠加 profile：
-
-```bash
-python scripts/run_pipeline.py --config configs/profiles/gemini_yunwu_smoke.yaml run --steps prepare-reference,seed-queries,crawl,preprocess,annotate
-```
-
-`export` 会在 `runtime/exports/dataset_export_<timestamp>/` 下生成面向数据集消费的导出目录，根目录仅包含：
-
-- `clips/`
-- `annotations/`
-- `README.md`
-
-其中 `annotations/<clip_uid>.json` 每条数据只保留：
-
-- `final_annotation`
-- `video_meta`
-- `clip_info`
-
-如果只想导出前 N 条 `done` 样本，可以使用 `python scripts/run_pipeline.py export --limit N`。
-
-也可以直接使用独立导出脚本，默认导出全部 `done` 样本：
-
-```bash
-python scripts/export_dataset.py
-python scripts/export_dataset.py --runtime-root runtime/continuous_pipeline
-python scripts/export_dataset.py --limit 1000
-```
-
-脚本默认在 stderr 显示导出进度条；后台运行或只想保留 JSON 输出时可加 `--no-progress`。
-
 ## 双进程服务模式
 
-推荐开两个终端。
+这是当前推荐的主运行方式。开两个终端，并统一使用 [configs/profiles/continuous_vllm_pipeline.yaml](configs/profiles/continuous_vllm_pipeline.yaml)。
 
 终端 1，下载进程：
 
@@ -308,17 +133,28 @@ python scripts/run_pipeline.py \
   pipeline-loop
 ```
 
+通常不需要手动跑 `crawl`、`preprocess`、`annotate`。`download-loop` 会持续补 query、抓候选、下载视频；`pipeline-loop` 会持续消费已下载视频，完成切片、过滤和并行标注。
+
 `download-loop` 的特点：
 
-- 下载是单独进程，适合长期运行
 - 如果 reference JSON 不存在，会先自动执行一轮 `prepare-reference`
 - 每个视频会打印 `download_start / download_progress / download_finish`
 - 循环快照里会看到 `downloading / downloaded / pending_preprocess`
 - 当 `queries` 表为空时可自动补种
-- 当 `pending` 用完时可自动 recycle 已完成 query，不需要手动重新 `seed-queries`
+- 当 `pending` 用完时可自动 recycle 已完成 query
 - `max_queries_per_cycle: 0` 表示每轮尽可能多抓，不人为限制 query 批次
 
-如果两台机器不能通信，但你希望它们尽量多抓视频，同时避免重复跑同一批 query，应该直接做静态 query 分片：
+`pipeline-loop` 的特点：
+
+- 如果 reference JSON 不存在，会先自动执行一轮 `prepare-reference`
+- 预处理和标注是联动流水线，不是两个割裂阶段
+- accepted clip 会先进入待标注队列
+- 达到 `annotation_trigger_size` 或等待超过 `annotation_trigger_timeout_sec` 后触发并行标注
+- 待标注队列达到 `queue_max_clips` 时会对预处理形成反压
+
+这里不做“总百分比进度条”，因为总视频数和总 clip 数都在动态变化。更合适的是动态快照日志。
+
+多机运行时，如果机器之间不能通信但要避免重复跑同一批 query，可以做静态 query 分片：
 
 ```yaml
 crawl:
@@ -332,24 +168,40 @@ crawl:
 - 机器 A：`count: 2, index: 0`
 - 机器 B：`count: 2, index: 1`
 
-当前默认连续运行 profile 只开 `query_shard`，不再默认启用 `video_shard`。
+如果是 `N` 台机器，就设 `count: N`，然后每台机器各自使用唯一的 `index`。
 
-- `query_shard`：把 query 队列拆开，避免两台机器重复跑同一批 query，同时尽量扩大整体 query 覆盖面
-- `video_shard`：如果你更在意跨机去重而不是拉高下载量，可以手动重新打开；代价是很多 query 命中会被直接裁掉，单机 `queued_for_download` 会明显下降
+## 辅助命令
 
-这样两边都会基于同一份 `query_seed_catalog.json` 自动补种，但每台机器只会导入和消费自己那一片 `query_id`。这种配置更适合“先尽量多下载，再靠后续过滤挑样本”的场景。
+常规生产运行以 `download-loop` + `pipeline-loop` 为准。下面这些命令主要用于查看状态、导出和人工复核：
 
-如果是 `N` 台机器，就设 `count: N`，然后每台机器各自使用唯一的 `index`。例如 5 台机器时，`index` 分别设为 `0`、`1`、`2`、`3`、`4`。
+```bash
+python scripts/run_pipeline.py --config configs/profiles/continuous_vllm_pipeline.yaml status
+python scripts/run_pipeline.py --config configs/profiles/continuous_vllm_pipeline.yaml dataset-stats
+python scripts/run_pipeline.py --config configs/profiles/continuous_vllm_pipeline.yaml export
+python scripts/run_pipeline.py --config configs/profiles/continuous_vllm_pipeline.yaml export --limit 1000
+python scripts/run_pipeline.py --config configs/profiles/continuous_vllm_pipeline.yaml review-list --status pending --limit 20
+python scripts/run_pipeline.py --config configs/profiles/continuous_vllm_pipeline.yaml review-complete --review-uid review_xxx --annotation-json /path/to/reviewed_annotation.json --reviewer aidan
+```
 
-`pipeline-loop` 的特点：
+`status` 会输出 query / video / clip / annotation 的计数、下载/预处理/标注平均耗时，以及基于当前均值和 worker 配置的 `projection_5d` 估算。
 
-- 如果 reference JSON 不存在，会先自动执行一轮 `prepare-reference`
-- 预处理和标注不是两个完全割裂的阶段，而是联动流水线
-- accepted clip 会先进入待标注队列
-- 当待标注 clip 达到 `annotation_trigger_size`，或最老待标注 clip 等待超过 `annotation_trigger_timeout_sec`，就会触发并行标注
-- 如果待标注队列达到 `queue_max_clips`，会对预处理形成反压，避免 clip 无限堆积
+`dataset-stats` 会输出场景、平台、触发事件、群体行为、群体情绪、clip 时长、置信度、质量标记、字段覆盖率，以及候选标注 / Judge / 人审 / lineage 的审计计数。
 
-这里不做“总百分比进度条”，因为总视频数和总 clip 数都在动态变化。更合适的是动态快照日志。
+`review-list` / `review-complete` 用于处理 `human_reviews` 待办。若 profile 设置 `annotation.export_requires_review_clear=true`，`export` 会跳过仍处于 `review_required=true` 的样本，直到复核完成。
+
+`export` 会在 `runtime/exports/dataset_export_<timestamp>/` 下生成交付目录，根目录只包含：
+
+- `clips/`
+- `annotations/`
+- `README.md`
+
+如果要临时排查某个阶段，可以手动执行单阶段命令：
+
+```bash
+python scripts/run_pipeline.py --config configs/profiles/continuous_vllm_pipeline.yaml crawl
+python scripts/run_pipeline.py --config configs/profiles/continuous_vllm_pipeline.yaml preprocess
+python scripts/run_pipeline.py --config configs/profiles/continuous_vllm_pipeline.yaml annotate
+```
 
 ## 关键配置
 
