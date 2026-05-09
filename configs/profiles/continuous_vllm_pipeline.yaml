@@ -54,8 +54,31 @@ preprocessing:
 annotation:
   max_clips_per_run: 128
   clip_workers: 16
-  min_overall_confidence: 0.6
-  export_requires_review_clear: false
+  min_overall_confidence: 0.8
+  export_requires_review_clear: true
+  confidence_routing:
+    enabled: true
+    reject_below: 0.80
+    review_below: 0.85
+  candidate_workers: 3
+  candidate_models:
+    - name: gemma
+      model: gemma-4-26b-a4b-it
+      base_url: http://127.0.0.1:8103/v1
+      api_key_env: OPENAI_API_KEY
+    - name: qwen
+      model: qwen3.5-35b
+      base_url: http://127.0.0.1:8103/v1
+      api_key_env: OPENAI_API_KEY
+    - name: internvl
+      model: internvl3_5-30b-a3b-hf
+      base_url: http://127.0.0.1:8103/v1
+      api_key_env: OPENAI_API_KEY
+  judge:
+    enabled: true
+    model: qwen3.5-35b
+    base_url: http://127.0.0.1:8103/v1
+    api_key_env: OPENAI_API_KEY
 
 llm:
   enabled: true

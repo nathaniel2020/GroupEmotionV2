@@ -14,7 +14,7 @@
 - 运行期只读取本地 reference JSON，不再重复解析 Excel。
 - B 站采集支持并行 enrich 和并行下载。
 - LLM 调用支持全局并发闸门，所有 stage 共用同一上限。
-- 标注输出兼容 `013.01` 形态：`agent_outputs`、`final_annotation`、`field_confidence`、`quality_flags`。
+- 标注输出兼容 `013.01` 形态：`agent_outputs`、`final_annotation`、`field_confidence`、`quality_flags`；标注执行层支持候选标注与可选 Judge 裁决。
 - raw source video 只做临时文件，处理完成后删除；accepted clip 保留，rejected clip 删除。
 
 ## 环境要求
@@ -41,9 +41,40 @@ pip install -e .
 - B 站下载并发：`crawl.download.workers`
 - 预处理并发：`preprocessing.workers`
 - clip 标注并发：`annotation.clip_workers`
+- 候选标注与裁决：`annotation.candidate_models`、`annotation.judge.enabled`
+- 候选模型默认继承 `llm.*`；需要单独服务配置时，在候选项或 `annotation.judge` 里覆盖 `model/base_url/api_key_env/timeout_sec/temperature/max_images_per_prompt`
 - 全局 LLM 请求并发：`llm.parallel.max_inflight_requests`
 - 服务循环参数：`service.download_loop.*`、`service.pipeline_loop.*`
 - query 自动补种 / 回填参数：`service.download_loop.auto_seed_if_empty`、`auto_refill_done_queries`、`query_recycle_cooldown_sec`、`max_runs_per_query`
+
+候选模型不再按 `agent` 拆分；每个候选模型都会独立完成完整标注。最简写法是直接列模型名：
+
+```yaml
+annotation:
+  candidate_models:
+    - gemma-4-26b-a4b-it
+    - qwen3.5-35b
+    - internvl3_5-30b-a3b-hf
+```
+
+如果不同模型跑在不同 OpenAI-compatible 服务上，写成对象并覆盖连接参数：
+
+```yaml
+annotation:
+  candidate_models:
+    - name: gemma
+      model: gemma-4-26b-a4b-it
+      base_url: http://127.0.0.1:8101/v1
+      api_key_env: OPENAI_API_KEY
+    - name: qwen
+      model: qwen3.5-35b
+      base_url: http://127.0.0.1:8102/v1
+      api_key_env: OPENAI_API_KEY
+  judge:
+    enabled: true
+    model: qwen3.5-35b
+    base_url: http://127.0.0.1:8102/v1
+```
 
 可用 profile：
 
@@ -210,9 +241,16 @@ python scripts/run_pipeline.py annotate
 python scripts/run_pipeline.py export
 python scripts/run_pipeline.py export --limit 1000
 python scripts/run_pipeline.py status
+python scripts/run_pipeline.py dataset-stats
+python scripts/run_pipeline.py review-list --status pending --limit 20
+python scripts/run_pipeline.py review-complete --review-uid review_xxx --annotation-json /path/to/reviewed_annotation.json --reviewer aidan
 ```
 
 `status` 会输出 query / video / clip / annotation 的计数、下载/预处理/标注平均耗时，以及基于当前均值和 worker 配置的 `projection_5d` 估算。
+
+`dataset-stats` 会输出面向审计和回填文档的覆盖统计，包括场景、平台、触发事件、群体行为、群体情绪、clip 时长、整体置信度、质量标记、字段覆盖率，以及候选标注 / Judge / 人审 / lineage 的审计计数。
+
+`review-list` / `review-complete` 用于处理 `human_reviews` 待办。若 profile 设置 `annotation.export_requires_review_clear=true`，`export` 会跳过仍处于 `review_required=true` 的样本，直到复核完成。
 
 也可以一次串行执行：
 
@@ -433,6 +471,8 @@ sources:
 - `runtime/artifacts/annotations/`
 - `runtime/artifacts/rejections/`
 - `runtime/exports/`
+
+标注审计信息写入 `runtime/index.sqlite` 的 `annotation_candidates`、`judge_decisions`、`human_reviews` 和 `lineage_edges`。这些表不进入默认交付目录，但可通过 `dataset-stats` 和数据库抽查支撑内部复核。
 
 导出的数据集目录不会复制 runtime 原始工件；它只保留最终切片、精简后的标注 JSON 和导出说明 README。
 

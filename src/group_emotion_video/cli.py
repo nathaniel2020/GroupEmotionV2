@@ -44,6 +44,24 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("seed-queries", "crawl", "preprocess", "annotate", "download-loop", "pipeline-loop", "status"):
         subparsers.add_parser(name)
 
+    stats_parser = subparsers.add_parser("dataset-stats")
+    stats_parser.add_argument("--top-n", type=int, default=20, dest="top_n")
+
+    review_list_parser = subparsers.add_parser("review-list")
+    review_list_parser.add_argument("--status", default="pending", dest="status")
+    review_list_parser.add_argument("--limit", type=int, default=20, dest="limit")
+
+    review_complete_parser = subparsers.add_parser("review-complete")
+    review_complete_parser.add_argument("--review-uid", required=True, dest="review_uid")
+    review_complete_parser.add_argument("--annotation-json", required=True, dest="annotation_json_path")
+    review_complete_parser.add_argument("--reviewer", dest="reviewer")
+    review_complete_parser.add_argument("--notes", dest="review_notes")
+
+    review_cancel_parser = subparsers.add_parser("review-cancel")
+    review_cancel_parser.add_argument("--review-uid", required=True, dest="review_uid")
+    review_cancel_parser.add_argument("--reviewer", dest="reviewer")
+    review_cancel_parser.add_argument("--notes", dest="review_notes")
+
     export_parser = subparsers.add_parser("export")
     export_parser.add_argument("--limit", type=int, dest="limit")
     export_parser.add_argument("--min-confidence", type=float, dest="min_confidence")
@@ -120,6 +138,23 @@ def main(argv: list[str] | None = None) -> int:
         result = workflow.export(limit=args.limit, min_confidence=args.min_confidence, caps=caps)
     elif args.command == "status":
         result = workflow.status()
+    elif args.command == "dataset-stats":
+        result = workflow.dataset_stats(top_n=args.top_n)
+    elif args.command == "review-list":
+        result = workflow.list_reviews(status=args.status, limit=args.limit)
+    elif args.command == "review-complete":
+        result = workflow.complete_review(
+            review_uid=args.review_uid,
+            annotation_json_path=args.annotation_json_path,
+            reviewer=args.reviewer,
+            review_notes=args.review_notes,
+        )
+    elif args.command == "review-cancel":
+        result = workflow.cancel_review(
+            review_uid=args.review_uid,
+            reviewer=args.reviewer,
+            review_notes=args.review_notes,
+        )
     elif args.command == "run":
         steps = [step.strip() for step in args.steps.split(",") if step.strip()]
         result = workflow.run(steps)

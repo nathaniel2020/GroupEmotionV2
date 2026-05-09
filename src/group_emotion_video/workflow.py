@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from .acquisition import AcquisitionService
-from .annotation import AnnotationService, SingleModelAnnotator
+from .annotation import AdjudicatedAnnotator, AnnotationService
 from .config import load_config
+from .dataset_stats import DatasetStatsService
 from .exporter import ExportService
 from .legacy_runtime_import import LegacyRuntimeImporter
 from .llm import OpenAICompatibleLLM
@@ -199,7 +200,7 @@ class Workflow:
     def _build_annotation_service(self) -> AnnotationService:
         _, annotation_domains_path = self._require_reference()
         domains = load_annotation_domains(annotation_domains_path)
-        annotator = self._annotator_override or SingleModelAnnotator(self.config, domains=domains, llm=self.llm)
+        annotator = self._annotator_override or AdjudicatedAnnotator(self.config, domains=domains, llm=self.llm)
         return AnnotationService(
             self.config,
             annotator=annotator,
@@ -222,9 +223,54 @@ class Workflow:
         caps: dict[tuple[str, str], int] | None = None,
     ) -> str:
         _, annotation_domains_path = self._require_reference()
-        rows = self.video_repo.list_exportable(limit=limit, min_confidence=min_confidence, caps=caps)
+        rows = self.video_repo.list_exportable(
+            limit=limit,
+            min_confidence=min_confidence,
+            caps=caps,
+            require_review_clear=bool(self.config.get("annotation", {}).get("export_requires_review_clear", False)),
+        )
         export_dir = ExportService(layout=self.layout, logger=self.logger).export(rows, annotation_domains_path)
+        self.annotation_repo.record_export_lineage(export_dir=str(export_dir), rows=rows)
         return str(export_dir)
+
+    def dataset_stats(self, *, top_n: int = 20) -> dict[str, Any]:
+        _, annotation_domains_path = self._require_reference()
+        return DatasetStatsService(self.db, annotation_domains_path=annotation_domains_path).build(top_n=top_n)
+
+    def list_reviews(self, *, status: str = "pending", limit: int = 20) -> list[dict[str, Any]]:
+        return self.annotation_repo.list_human_reviews(status=status, limit=limit)
+
+    def complete_review(
+        self,
+        *,
+        review_uid: str,
+        annotation_json_path: str | Path,
+        reviewer: str | None = None,
+        review_notes: str | None = None,
+    ) -> dict[str, Any]:
+        payload = json.loads(self._resolve_path(annotation_json_path).read_text(encoding="utf-8"))
+        after_annotation = payload.get("final_annotation", payload) if isinstance(payload, dict) else {}
+        if not isinstance(after_annotation, dict):
+            raise ValueError("review annotation JSON must be an object or contain final_annotation object")
+        return self.annotation_repo.complete_human_review(
+            review_uid=review_uid,
+            after_annotation=after_annotation,
+            reviewer=reviewer,
+            review_notes=review_notes,
+        )
+
+    def cancel_review(
+        self,
+        *,
+        review_uid: str,
+        reviewer: str | None = None,
+        review_notes: str | None = None,
+    ) -> dict[str, Any]:
+        return self.annotation_repo.cancel_human_review(
+            review_uid=review_uid,
+            reviewer=reviewer,
+            review_notes=review_notes,
+        )
 
     def _query_summary(self, *, owned_only: bool = True) -> dict[str, Any]:
         if not hasattr(self.query_repo, "summary"):
@@ -589,6 +635,8 @@ class Workflow:
                 results[step] = self.export()
             elif step == "status":
                 results[step] = self.status()
+            elif step == "dataset-stats":
+                results[step] = self.dataset_stats()
             else:
                 raise ValueError(f"Unsupported step: {step}")
         return results

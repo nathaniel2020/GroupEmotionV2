@@ -71,6 +71,16 @@ annotation:
   clip_workers: 4
   min_overall_confidence: 0.6
   export_requires_review_clear: false
+  confidence_routing:
+    enabled: false
+    reject_below: 0.80
+    review_below: 0.85
+  candidate_workers: 1
+  candidate_models:
+    - name: primary
+      model:
+  judge:
+    enabled: false
 
 llm:
   enabled: false

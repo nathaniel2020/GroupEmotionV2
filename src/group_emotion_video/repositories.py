@@ -343,6 +343,7 @@ class VideoRepository:
         limit: int | None = None,
         min_confidence: float | None = None,
         caps: dict[tuple[str, str], int] | None = None,
+        require_review_clear: bool = False,
     ) -> list[dict[str, Any]]:
         if limit is not None and int(limit) < 0:
             raise ValueError("export limit must be >= 0")
@@ -350,6 +351,8 @@ class VideoRepository:
             return []
         conditions = ["a.status='done'"]
         params: list[Any] = []
+        if require_review_clear:
+            conditions.append("a.review_required=0")
         if min_confidence is not None:
             conditions.append(
                 "CAST(json_extract(a.field_confidence_json, '$.overall') AS REAL) >= ?"
@@ -608,6 +611,11 @@ class AnnotationRepository:
     def __init__(self, db: SQLiteDB):
         self.db = db
 
+    @staticmethod
+    def _audit_uid(*parts: Any) -> str:
+        text = "::".join(str(part) for part in parts)
+        return hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
+
     def upsert(self, record: dict[str, Any]) -> None:
         self.db.execute(
             """
@@ -641,6 +649,428 @@ class AnnotationRepository:
                 record.get("artifact_path"),
             ),
         )
+
+    def record_annotation_audit(
+        self,
+        *,
+        annotation_uid: str,
+        clip_uid: str,
+        agent_outputs: dict[str, Any],
+        final_annotation: dict[str, Any],
+        field_confidence: dict[str, Any],
+        quality_flags: list[str],
+        review_required: bool,
+    ) -> None:
+        candidate_results = agent_outputs.get("candidate_results") or []
+        if isinstance(candidate_results, list):
+            for candidate in candidate_results:
+                if isinstance(candidate, dict):
+                    self._upsert_candidate(annotation_uid=annotation_uid, clip_uid=clip_uid, candidate=candidate)
+
+        judge_payload = agent_outputs.get("judge")
+        if isinstance(judge_payload, dict) and bool(judge_payload.get("enabled")):
+            self._upsert_judge_decision(annotation_uid=annotation_uid, clip_uid=clip_uid, judge_payload=judge_payload)
+
+        if review_required:
+            conflict_fields: list[str] = []
+            if isinstance(judge_payload, dict):
+                raw_conflicts = judge_payload.get("conflict_fields") or []
+                if isinstance(raw_conflicts, list):
+                    conflict_fields = [str(item) for item in raw_conflicts if str(item).strip()]
+            self._upsert_review_task(
+                annotation_uid=annotation_uid,
+                clip_uid=clip_uid,
+                conflict_fields=conflict_fields,
+                before_annotation=final_annotation,
+            )
+
+        self._refresh_lineage_for_annotation(
+            annotation_uid=annotation_uid,
+            clip_uid=clip_uid,
+            agent_outputs=agent_outputs,
+            review_required=review_required,
+            field_confidence=field_confidence,
+            quality_flags=quality_flags,
+        )
+
+    def record_export_lineage(self, *, export_dir: str, rows: list[dict[str, Any]]) -> None:
+        export_batch_id = str(export_dir).rstrip("/").split("/")[-1]
+        for row in rows:
+            annotation_uid = str(row.get("annotation_uid") or "")
+            clip_uid = str(row.get("clip_uid") or "")
+            if annotation_uid:
+                self._upsert_lineage_edge(
+                    parent_type="annotation",
+                    parent_id=annotation_uid,
+                    child_type="export_batch",
+                    child_id=export_batch_id,
+                    relation="included_in_export",
+                    extra={"clip_uid": clip_uid, "export_dir": export_dir},
+                )
+
+    def list_human_reviews(self, *, status: str = "pending", limit: int = 20) -> list[dict[str, Any]]:
+        conditions = []
+        params: list[Any] = []
+        if status and status != "all":
+            conditions.append("hr.status=?")
+            params.append(status)
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        rows = self.db.fetchall(
+            f"""
+            SELECT hr.*, a.status AS annotation_status, a.quality_flags_json, a.field_confidence_json
+            FROM human_reviews hr
+            JOIN annotations a ON a.annotation_uid=hr.annotation_uid
+            {where_clause}
+            ORDER BY COALESCE(hr.updated_at, hr.created_at, ''), hr.review_uid
+            LIMIT ?
+            """,
+            (*params, int(limit)),
+        )
+        return [self._deserialize_human_review(row) for row in rows]
+
+    def complete_human_review(
+        self,
+        *,
+        review_uid: str,
+        after_annotation: dict[str, Any],
+        reviewer: str | None = None,
+        review_notes: str | None = None,
+    ) -> dict[str, Any]:
+        row = self.db.fetchone(
+            """
+            SELECT hr.*, a.quality_flags_json
+            FROM human_reviews hr
+            JOIN annotations a ON a.annotation_uid=hr.annotation_uid
+            WHERE hr.review_uid=?
+            """,
+            (review_uid,),
+        )
+        if row is None:
+            raise ValueError(f"Unknown human review: {review_uid}")
+        now = datetime.now().isoformat(timespec="seconds")
+        annotation_uid = str(row["annotation_uid"])
+        clip_uid = str(row["clip_uid"])
+        quality_flags = self.db.from_json(row["quality_flags_json"], [])
+        quality_flags = list(dict.fromkeys([*quality_flags, "human_review_completed"]))
+        self.db.execute(
+            """
+            UPDATE human_reviews
+            SET status='completed',
+                after_annotation_json=?,
+                reviewer=?,
+                review_notes=?,
+                updated_at=?
+            WHERE review_uid=?
+            """,
+            (
+                self.db.to_json(after_annotation),
+                reviewer,
+                review_notes,
+                now,
+                review_uid,
+            ),
+        )
+        self.db.execute(
+            """
+            UPDATE annotations
+            SET status='done',
+                review_required=0,
+                final_annotation_json=?,
+                quality_flags_json=?
+            WHERE annotation_uid=?
+            """,
+            (
+                self.db.to_json(after_annotation),
+                self.db.to_json(quality_flags),
+                annotation_uid,
+            ),
+        )
+        self.db.execute("UPDATE clips SET annotation_status='done' WHERE clip_uid=?", (clip_uid,))
+        self._upsert_lineage_edge(
+            parent_type="human_review",
+            parent_id=review_uid,
+            child_type="annotation",
+            child_id=annotation_uid,
+            relation="review_completed",
+            extra={"reviewer": reviewer, "updated_at": now},
+        )
+        return {
+            "review_uid": review_uid,
+            "annotation_uid": annotation_uid,
+            "clip_uid": clip_uid,
+            "status": "completed",
+        }
+
+    def cancel_human_review(
+        self,
+        *,
+        review_uid: str,
+        reviewer: str | None = None,
+        review_notes: str | None = None,
+    ) -> dict[str, Any]:
+        row = self.db.fetchone("SELECT annotation_uid, clip_uid FROM human_reviews WHERE review_uid=?", (review_uid,))
+        if row is None:
+            raise ValueError(f"Unknown human review: {review_uid}")
+        now = datetime.now().isoformat(timespec="seconds")
+        self.db.execute(
+            """
+            UPDATE human_reviews
+            SET status='cancelled',
+                reviewer=?,
+                review_notes=?,
+                updated_at=?
+            WHERE review_uid=?
+            """,
+            (reviewer, review_notes, now, review_uid),
+        )
+        return {
+            "review_uid": review_uid,
+            "annotation_uid": str(row["annotation_uid"]),
+            "clip_uid": str(row["clip_uid"]),
+            "status": "cancelled",
+        }
+
+    def _upsert_candidate(self, *, annotation_uid: str, clip_uid: str, candidate: dict[str, Any]) -> None:
+        candidate_id = str(candidate.get("candidate_id") or "candidate")
+        candidate_uid = f"candidate_{self._audit_uid(annotation_uid, candidate_id)}"
+        self.db.execute(
+            """
+            INSERT INTO annotation_candidates (
+              candidate_uid, annotation_uid, clip_uid, candidate_id, agent, model, status,
+              final_annotation_json, field_confidence_json, quality_flags_json, raw_payload_json,
+              error_message, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(candidate_uid) DO UPDATE SET
+              annotation_uid=excluded.annotation_uid,
+              clip_uid=excluded.clip_uid,
+              candidate_id=excluded.candidate_id,
+              agent=excluded.agent,
+              model=excluded.model,
+              status=excluded.status,
+              final_annotation_json=excluded.final_annotation_json,
+              field_confidence_json=excluded.field_confidence_json,
+              quality_flags_json=excluded.quality_flags_json,
+              raw_payload_json=excluded.raw_payload_json,
+              error_message=excluded.error_message
+            """,
+            (
+                candidate_uid,
+                annotation_uid,
+                clip_uid,
+                candidate_id,
+                candidate.get("agent"),
+                candidate.get("model"),
+                str(candidate.get("status") or "unknown"),
+                self.db.to_json(candidate.get("final_annotation", {})),
+                self.db.to_json(candidate.get("field_confidence", {})),
+                self.db.to_json(candidate.get("quality_flags", [])),
+                self.db.to_json(candidate.get("raw_payload", {})),
+                candidate.get("error"),
+                datetime.now().isoformat(timespec="seconds"),
+            ),
+        )
+        self._upsert_lineage_edge(
+            parent_type="annotation",
+            parent_id=annotation_uid,
+            child_type="annotation_candidate",
+            child_id=candidate_uid,
+            relation="has_candidate",
+            extra={"candidate_id": candidate_id, "status": candidate.get("status")},
+        )
+
+    def _upsert_judge_decision(self, *, annotation_uid: str, clip_uid: str, judge_payload: dict[str, Any]) -> None:
+        self.db.execute(
+            """
+            INSERT INTO judge_decisions (
+              annotation_uid, clip_uid, status, selected_candidate_ids_json, conflict_fields_json,
+              decision_reasoning, final_annotation_json, field_confidence_json, quality_flags_json,
+              raw_payload_json, fallback_candidate_id, error_message, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(annotation_uid) DO UPDATE SET
+              clip_uid=excluded.clip_uid,
+              status=excluded.status,
+              selected_candidate_ids_json=excluded.selected_candidate_ids_json,
+              conflict_fields_json=excluded.conflict_fields_json,
+              decision_reasoning=excluded.decision_reasoning,
+              final_annotation_json=excluded.final_annotation_json,
+              field_confidence_json=excluded.field_confidence_json,
+              quality_flags_json=excluded.quality_flags_json,
+              raw_payload_json=excluded.raw_payload_json,
+              fallback_candidate_id=excluded.fallback_candidate_id,
+              error_message=excluded.error_message
+            """,
+            (
+                annotation_uid,
+                clip_uid,
+                str(judge_payload.get("status") or "unknown"),
+                self.db.to_json(judge_payload.get("selected_candidate_ids", [])),
+                self.db.to_json(judge_payload.get("conflict_fields", [])),
+                judge_payload.get("decision_reasoning"),
+                self.db.to_json(judge_payload.get("final_annotation", {})),
+                self.db.to_json(judge_payload.get("field_confidence", {})),
+                self.db.to_json(judge_payload.get("quality_flags", [])),
+                self.db.to_json(judge_payload.get("raw_payload", {})),
+                judge_payload.get("fallback_candidate_id"),
+                judge_payload.get("error"),
+                datetime.now().isoformat(timespec="seconds"),
+            ),
+        )
+        self._upsert_lineage_edge(
+            parent_type="annotation",
+            parent_id=annotation_uid,
+            child_type="judge_decision",
+            child_id=annotation_uid,
+            relation="has_judge_decision",
+            extra={"status": judge_payload.get("status")},
+        )
+
+    def _upsert_review_task(
+        self,
+        *,
+        annotation_uid: str,
+        clip_uid: str,
+        conflict_fields: list[str],
+        before_annotation: dict[str, Any],
+    ) -> None:
+        review_uid = f"review_{self._audit_uid(annotation_uid)}"
+        existing = self.db.fetchone("SELECT status FROM human_reviews WHERE review_uid=?", (review_uid,))
+        existing_status = str(existing["status"]) if existing else ""
+        if existing_status in {"completed", "cancelled"}:
+            return
+        now = datetime.now().isoformat(timespec="seconds")
+        self.db.execute(
+            """
+            INSERT INTO human_reviews (
+              review_uid, annotation_uid, clip_uid, status, conflict_fields_json, before_annotation_json,
+              after_annotation_json, reviewer, review_notes, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(review_uid) DO UPDATE SET
+              annotation_uid=excluded.annotation_uid,
+              clip_uid=excluded.clip_uid,
+              status=excluded.status,
+              conflict_fields_json=excluded.conflict_fields_json,
+              before_annotation_json=excluded.before_annotation_json,
+              updated_at=excluded.updated_at
+            """,
+            (
+                review_uid,
+                annotation_uid,
+                clip_uid,
+                "pending",
+                self.db.to_json(conflict_fields),
+                self.db.to_json(before_annotation),
+                None,
+                None,
+                None,
+                now,
+                now,
+            ),
+        )
+        self._upsert_lineage_edge(
+            parent_type="annotation",
+            parent_id=annotation_uid,
+            child_type="human_review",
+            child_id=review_uid,
+            relation="requires_review",
+            extra={"conflict_fields": conflict_fields},
+        )
+
+    def _refresh_lineage_for_annotation(
+        self,
+        *,
+        annotation_uid: str,
+        clip_uid: str,
+        agent_outputs: dict[str, Any],
+        review_required: bool,
+        field_confidence: dict[str, Any],
+        quality_flags: list[str],
+    ) -> None:
+        row = self.db.fetchone(
+            """
+            SELECT c.video_uid, v.query_id
+            FROM clips c
+            JOIN videos v ON v.video_uid=c.video_uid
+            WHERE c.clip_uid=?
+            """,
+            (clip_uid,),
+        )
+        if row:
+            query_id = str(row["query_id"])
+            video_uid = str(row["video_uid"])
+            self._upsert_lineage_edge(
+                parent_type="query",
+                parent_id=query_id,
+                child_type="video",
+                child_id=video_uid,
+                relation="retrieved_video",
+                extra={},
+            )
+            self._upsert_lineage_edge(
+                parent_type="video",
+                parent_id=video_uid,
+                child_type="clip",
+                child_id=clip_uid,
+                relation="generated_clip",
+                extra={},
+            )
+        self._upsert_lineage_edge(
+            parent_type="clip",
+            parent_id=clip_uid,
+            child_type="annotation",
+            child_id=annotation_uid,
+            relation="annotated_as",
+            extra={
+                "framework": agent_outputs.get("annotation_framework"),
+                "review_required": review_required,
+                "overall_confidence": field_confidence.get("overall"),
+                "quality_flags": quality_flags,
+            },
+        )
+
+    def _upsert_lineage_edge(
+        self,
+        *,
+        parent_type: str,
+        parent_id: str,
+        child_type: str,
+        child_id: str,
+        relation: str,
+        extra: dict[str, Any],
+    ) -> None:
+        edge_uid = f"edge_{self._audit_uid(parent_type, parent_id, child_type, child_id, relation)}"
+        self.db.execute(
+            """
+            INSERT INTO lineage_edges (
+              edge_uid, parent_type, parent_id, child_type, child_id, relation, created_at, extra_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(edge_uid) DO UPDATE SET
+              parent_type=excluded.parent_type,
+              parent_id=excluded.parent_id,
+              child_type=excluded.child_type,
+              child_id=excluded.child_id,
+              relation=excluded.relation,
+              extra_json=excluded.extra_json
+            """,
+            (
+                edge_uid,
+                parent_type,
+                parent_id,
+                child_type,
+                child_id,
+                relation,
+                datetime.now().isoformat(timespec="seconds"),
+                self.db.to_json(extra),
+            ),
+        )
+
+    def _deserialize_human_review(self, row: Any) -> dict[str, Any]:
+        result = dict(row)
+        result["conflict_fields"] = self.db.from_json(result.pop("conflict_fields_json"), [])
+        result["before_annotation"] = self.db.from_json(result.pop("before_annotation_json"), {})
+        result["after_annotation"] = self.db.from_json(result.pop("after_annotation_json"), None)
+        result["quality_flags"] = self.db.from_json(result.pop("quality_flags_json"), [])
+        result["field_confidence"] = self.db.from_json(result.pop("field_confidence_json"), {})
+        return result
 
     def summary(self) -> dict[str, Any]:
         rows = self.db.fetchall("SELECT status, COUNT(*) AS count FROM annotations GROUP BY status")

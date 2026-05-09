@@ -166,6 +166,75 @@ def initialize_schema(db: SQLiteDB) -> None:
         )
         """
     )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS annotation_candidates (
+            candidate_uid TEXT PRIMARY KEY,
+            annotation_uid TEXT NOT NULL,
+            clip_uid TEXT NOT NULL,
+            candidate_id TEXT NOT NULL,
+            agent TEXT,
+            model TEXT,
+            status TEXT NOT NULL,
+            final_annotation_json TEXT NOT NULL,
+            field_confidence_json TEXT NOT NULL,
+            quality_flags_json TEXT NOT NULL,
+            raw_payload_json TEXT NOT NULL,
+            error_message TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS judge_decisions (
+            annotation_uid TEXT PRIMARY KEY,
+            clip_uid TEXT NOT NULL,
+            status TEXT NOT NULL,
+            selected_candidate_ids_json TEXT NOT NULL,
+            conflict_fields_json TEXT NOT NULL,
+            decision_reasoning TEXT,
+            final_annotation_json TEXT NOT NULL,
+            field_confidence_json TEXT NOT NULL,
+            quality_flags_json TEXT NOT NULL,
+            raw_payload_json TEXT NOT NULL,
+            fallback_candidate_id TEXT,
+            error_message TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS human_reviews (
+            review_uid TEXT PRIMARY KEY,
+            annotation_uid TEXT NOT NULL,
+            clip_uid TEXT NOT NULL,
+            status TEXT NOT NULL,
+            conflict_fields_json TEXT NOT NULL,
+            before_annotation_json TEXT NOT NULL,
+            after_annotation_json TEXT,
+            reviewer TEXT,
+            review_notes TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS lineage_edges (
+            edge_uid TEXT PRIMARY KEY,
+            parent_type TEXT NOT NULL,
+            parent_id TEXT NOT NULL,
+            child_type TEXT NOT NULL,
+            child_id TEXT NOT NULL,
+            relation TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            extra_json TEXT NOT NULL
+        )
+        """
+    )
     _ensure_columns(
         db,
         "queries",

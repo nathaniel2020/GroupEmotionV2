@@ -4,6 +4,7 @@ import argparse
 import json
 import shutil
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +12,11 @@ from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from group_emotion_video.config import load_config
 
 
 VIDEO_META_FIELDS = (
@@ -45,24 +51,30 @@ def build_parser() -> argparse.ArgumentParser:
         description="Standalone exporter for done group-emotion video samples.",
     )
     parser.add_argument(
+        "--config",
+        action="append",
+        dest="config_paths",
+        default=[],
+        help="Optional config overlay path. When provided, defaults are read from project.runtime_dir and project.annotation_domains_path.",
+    )
+    parser.add_argument(
         "--runtime-root",
-        default="runtime",
-        help="Runtime directory that contains index.sqlite and exports/. Default: runtime",
+        help="Runtime directory that contains index.sqlite and exports/. Default: config project.runtime_dir, or runtime",
     )
     parser.add_argument(
         "--db-path",
-        help="SQLite database path. Overrides --runtime-root/index.sqlite.",
+        help="SQLite database path. Overrides config/default runtime_root/index.sqlite.",
     )
     parser.add_argument(
         "--output-root",
-        help="Directory for dataset_export_<timestamp>. Default: <runtime-root>/exports",
+        help="Directory for dataset_export_<timestamp>. Default: config/default <runtime-root>/exports",
     )
     parser.add_argument(
         "--annotation-domains",
         help=(
             "Optional annotation_domains.json path. Used only to order final_annotation fields. "
-            "If omitted, the script tries <runtime-root>/reference/annotation_domains.json "
-            "then data/reference/annotation_domains.json."
+            "If omitted, the script tries config project.annotation_domains_path, "
+            "then <runtime-root>/reference/annotation_domains.json, then data/reference/annotation_domains.json."
         ),
     )
     parser.add_argument(
@@ -84,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--skip-missing",
         action="store_true",
-        help="Skip rows whose clip, manifest, video_meta, or raw annotation file is missing.",
+        help="Skip rows whose clip is missing and cannot be copied or rebuilt from a retained source video.",
     )
     parser.add_argument(
         "--no-progress",
@@ -105,12 +117,6 @@ def resolve_optional_path(raw_path: str | None) -> Path | None:
     if raw_path is None or raw_path == "":
         return None
     return resolve_path(raw_path)
-
-
-def require_path(path: Path | None, name: str) -> Path:
-    if path is None:
-        raise SystemExit(f"{name} path is empty")
-    return path
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -155,6 +161,14 @@ def find_annotation_domains(runtime_root: Path, explicit_path: str | None) -> Pa
     return None
 
 
+def load_project_settings(config_paths: list[str]) -> dict[str, Any]:
+    if not config_paths:
+        return {}
+    config = load_config(config_paths)
+    project = config.get("project")
+    return project if isinstance(project, dict) else {}
+
+
 def load_annotation_field_order(path: Path | None) -> list[str]:
     if path is None:
         return []
@@ -166,17 +180,20 @@ def load_annotation_field_order(path: Path | None) -> list[str]:
 
 
 class ProgressBar:
-    def __init__(self, total: int, *, enabled: bool = True, width: int = 32) -> None:
+    def __init__(self, total: int, *, enabled: bool = True, width: int = 32, stream: Any | None = None) -> None:
         self.total = max(0, total)
         self.enabled = enabled
         self.width = width
+        self.stream = stream or sys.stderr
+        isatty = getattr(self.stream, "isatty", None)
+        self.interactive = bool(callable(isatty) and isatty())
+        self.report_every = 1 if self.total <= 20 else max(1, self.total // 20)
         self.last_line_len = 0
         self.last_line = ""
+        self.last_reported_current: int | None = None
 
-    def update(self, current: int, *, exported: int, skipped: int) -> None:
-        if not self.enabled:
-            return
-
+    def _format_line(self, current: int, *, exported: int, skipped: int, carriage_return: bool) -> str:
+        prefix = "\r" if carriage_return else ""
         if self.total <= 0:
             ratio = 1.0
         else:
@@ -184,29 +201,55 @@ class ProgressBar:
         filled = int(self.width * ratio)
         bar = "#" * filled + "-" * (self.width - filled)
         percent = ratio * 100
-        line = (
-            f"\rExporting [{bar}] {current}/{self.total} "
+        return (
+            f"{prefix}Exporting [{bar}] {current}/{self.total} "
             f"{percent:6.2f}% exported={exported} skipped={skipped}"
+        )
+
+    def update(self, current: int, *, exported: int, skipped: int) -> None:
+        if not self.enabled:
+            return
+
+        line = self._format_line(
+            current,
+            exported=exported,
+            skipped=skipped,
+            carriage_return=self.interactive,
         )
         if line == self.last_line:
             return
-        padding = " " * max(0, self.last_line_len - len(line))
-        sys.stderr.write(line + padding)
-        sys.stderr.flush()
-        self.last_line_len = len(line)
+
+        if self.interactive:
+            padding = " " * max(0, self.last_line_len - len(line))
+            self.stream.write(line + padding)
+            self.stream.flush()
+            self.last_line_len = len(line)
+        else:
+            should_report = (
+                self.last_reported_current is None
+                or current == 0
+                or current >= self.total
+                or current - self.last_reported_current >= self.report_every
+            )
+            if not should_report:
+                return
+            self.stream.write(line + "\n")
+            self.stream.flush()
+            self.last_reported_current = current
         self.last_line = line
 
     def finish(self, *, current: int, exported: int, skipped: int) -> None:
         if not self.enabled:
             return
         self.update(current, exported=exported, skipped=skipped)
-        sys.stderr.write("\n")
-        sys.stderr.flush()
+        if self.interactive:
+            self.stream.write("\n")
+            self.stream.flush()
 
     def newline(self) -> None:
-        if self.enabled:
-            sys.stderr.write("\n")
-            sys.stderr.flush()
+        if self.enabled and self.interactive:
+            self.stream.write("\n")
+            self.stream.flush()
 
 
 def query_done_rows(db_path: Path, min_confidence: float | None) -> list[sqlite3.Row]:
@@ -223,6 +266,11 @@ def query_done_rows(db_path: Path, min_confidence: float | None) -> list[sqlite3
             SELECT
               a.annotation_uid,
               a.clip_uid,
+              a.status AS annotation_status,
+              a.started_at AS annotation_started_at,
+              a.finished_at AS annotation_finished_at,
+              a.elapsed_sec AS annotation_elapsed_sec,
+              a.review_required,
               a.final_annotation_json,
               a.field_confidence_json,
               a.quality_flags_json,
@@ -256,7 +304,17 @@ def query_done_rows(db_path: Path, min_confidence: float | None) -> list[sqlite3
               v.scene_text,
               v.trigger_text,
               v.source_excel_row,
-              v.video_meta_path
+              v.raw_video_path,
+              v.video_meta_path,
+              (
+                SELECT de.local_path
+                FROM download_events de
+                WHERE de.video_uid = v.video_uid
+                  AND de.status = 'downloaded'
+                  AND de.local_path IS NOT NULL
+                ORDER BY de.event_id DESC
+                LIMIT 1
+              ) AS downloaded_local_path
             FROM annotations a
             JOIN clips c ON c.clip_uid = a.clip_uid
             JOIN videos v ON v.video_uid = c.video_uid
@@ -361,13 +419,144 @@ def build_clip_info(row: sqlite3.Row, clip_manifest_path: Path | None, clip_file
     }
 
 
-def required_paths(row: sqlite3.Row) -> dict[str, Path | None]:
+def first_existing_path(*candidates: Path | None) -> Path | None:
+    fallback: Path | None = None
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if fallback is None:
+            fallback = candidate
+        if candidate.exists():
+            return candidate
+    return fallback
+
+
+def default_artifact_paths(runtime_root: Path, row: sqlite3.Row) -> dict[str, Path]:
     return {
-        "clip": resolve_optional_path(row["clip_path"]),
-        "annotation": resolve_optional_path(row["artifact_path"]),
-        "manifest": resolve_optional_path(row["manifest_path"]),
-        "video_meta": resolve_optional_path(row["video_meta_path"]),
+        "clip": runtime_root / "artifacts" / "clips" / str(row["clip_uid"]) / "clip.mp4",
+        "annotation": runtime_root / "artifacts" / "annotations" / f"{row['annotation_uid']}.json",
+        "manifest": runtime_root / "artifacts" / "clips" / str(row["clip_uid"]) / "clip_manifest.json",
+        "video_meta": runtime_root / "artifacts" / "videos" / str(row["video_uid"]) / "video_meta.json",
     }
+
+
+def resolve_artifact_paths(runtime_root: Path, row: sqlite3.Row) -> dict[str, Path | None]:
+    defaults = default_artifact_paths(runtime_root, row)
+    return {
+        "clip": first_existing_path(resolve_optional_path(row["clip_path"]), defaults["clip"]),
+        "annotation": first_existing_path(resolve_optional_path(row["artifact_path"]), defaults["annotation"]),
+        "manifest": first_existing_path(resolve_optional_path(row["manifest_path"]), defaults["manifest"]),
+        "video_meta": first_existing_path(resolve_optional_path(row["video_meta_path"]), defaults["video_meta"]),
+    }
+
+
+def resolve_source_video_path(row: sqlite3.Row) -> Path | None:
+    for candidate in (
+        resolve_optional_path(row["raw_video_path"]),
+        resolve_optional_path(row["downloaded_local_path"]),
+    ):
+        if candidate is not None and candidate.exists():
+            return candidate
+    return None
+
+
+def source_video_hint(row: sqlite3.Row) -> Path | None:
+    return first_existing_path(
+        resolve_optional_path(row["raw_video_path"]),
+        resolve_optional_path(row["downloaded_local_path"]),
+    )
+
+
+def build_raw_annotation_payload(row: sqlite3.Row, annotation_path: Path | None) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if annotation_path is not None and annotation_path.exists():
+        loaded = load_json(annotation_path)
+        if isinstance(loaded, dict):
+            payload = loaded
+
+    final_annotation = payload.get("final_annotation")
+    if not isinstance(final_annotation, dict):
+        final_annotation = loads_json(row["final_annotation_json"], {})
+
+    field_confidence = payload.get("field_confidence")
+    if not isinstance(field_confidence, dict):
+        field_confidence = loads_json(row["field_confidence_json"], {})
+
+    quality_flags = payload.get("quality_flags")
+    if not isinstance(quality_flags, list):
+        quality_flags = loads_json(row["quality_flags_json"], [])
+
+    return {
+        **payload,
+        "annotation_uid": payload.get("annotation_uid", row["annotation_uid"]),
+        "clip_uid": payload.get("clip_uid", row["clip_uid"]),
+        "started_at": payload.get("started_at", row["annotation_started_at"]),
+        "finished_at": payload.get("finished_at", row["annotation_finished_at"]),
+        "elapsed_sec": payload.get("elapsed_sec", row["annotation_elapsed_sec"]),
+        "final_annotation": final_annotation,
+        "field_confidence": field_confidence,
+        "quality_flags": quality_flags,
+        "status": payload.get("status", row["annotation_status"]),
+        "review_required": payload.get("review_required", bool(row["review_required"])),
+    }
+
+
+def trim_clip_from_source(source_path: Path, target_path: Path, *, start_sec: float, duration_sec: float) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        str(start_sec),
+        "-i",
+        str(source_path),
+        "-t",
+        str(duration_sec),
+        "-c:v",
+        "libx264",
+        "-c:a",
+        "aac",
+        str(target_path),
+    ]
+    try:
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError as exc:
+        raise SystemExit("ffmpeg not found while rebuilding a missing clip during export") from exc
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(
+            f"failed to rebuild missing clip from source video: source={source_path} target={target_path}"
+        ) from exc
+
+
+def export_clip_file(
+    *,
+    row: sqlite3.Row,
+    source_clip_path: Path | None,
+    source_video_path: Path | None,
+    target_path: Path,
+) -> None:
+    if source_clip_path is not None and source_clip_path.exists():
+        shutil.copy2(source_clip_path, target_path)
+        return
+
+    if source_video_path is None or not source_video_path.exists():
+        raise SystemExit(
+            "missing required clip source for "
+            f"clip_uid={row['clip_uid']}: clip={source_clip_path or '<empty>'}, "
+            f"source_video={source_video_path or '<empty>'}"
+        )
+
+    trim_clip_from_source(
+        source_video_path,
+        target_path,
+        start_sec=float(row["start_sec"]),
+        duration_sec=float(row["clip_duration_sec"]),
+    )
 
 
 def write_readme(export_dir: Path, sample_count: int, created_at: datetime, db_path: Path) -> None:
@@ -380,7 +569,7 @@ def write_readme(export_dir: Path, sample_count: int, created_at: datetime, db_p
             f"- 来源数据库：`{db_path}`",
             "- 样本范围：仅包含 `annotations.status = 'done'` 的切片样本。",
             "- 每个样本包含一个 `clips/<clip_uid>.*` 视频文件和一个同名 `annotations/<clip_uid>.json` 标注文件。",
-            "- `raw_annotations/` 保留原始标注 JSON，便于追溯。",
+            "- `raw_annotations/` 保留原始标注 JSON；若原文件缺失，则自动用数据库内容回填生成。",
             "",
             "## 文件结构",
             "",
@@ -400,6 +589,7 @@ def write_readme(export_dir: Path, sample_count: int, created_at: datetime, db_p
 def export_dataset(
     *,
     db_path: Path,
+    runtime_root: Path,
     output_root: Path,
     annotation_domains_path: Path | None,
     limit: int | None,
@@ -434,27 +624,48 @@ def export_dataset(
     progress.update(0, exported=exported, skipped=len(skipped))
 
     for index, row in enumerate(rows, start=1):
-        paths = required_paths(row)
-        missing = [name for name, path in paths.items() if path is None or not path.exists()]
-        if missing:
+        paths = resolve_artifact_paths(runtime_root, row)
+        source_clip = paths["clip"] if paths["clip"] is not None and paths["clip"].exists() else None
+        source_annotation = paths["annotation"] if paths["annotation"] is not None and paths["annotation"].exists() else None
+        source_manifest = paths["manifest"] if paths["manifest"] is not None and paths["manifest"].exists() else None
+        source_video_meta = paths["video_meta"] if paths["video_meta"] is not None and paths["video_meta"].exists() else None
+        source_video = resolve_source_video_path(row)
+        source_video_path_hint = source_video_hint(row)
+
+        if source_clip is None and source_video is None:
             if skip_missing:
-                skipped.append({"clip_uid": row["clip_uid"], "missing": ",".join(missing)})
+                skipped.append({"clip_uid": row["clip_uid"], "missing": "clip,source_video"})
                 progress.update(index, exported=exported, skipped=len(skipped))
                 continue
             progress.newline()
-            missing_text = ", ".join(f"{name}={paths[name] or '<empty>'}" for name in missing)
+            missing_text = ", ".join(
+                [
+                    f"clip={paths['clip'] or '<empty>'}",
+                    f"source_video={source_video_path_hint or '<empty>'}",
+                ]
+            )
             raise SystemExit(f"missing required file for clip_uid={row['clip_uid']}: {missing_text}")
 
         clip_uid = row["clip_uid"]
-        source_clip = require_path(paths["clip"], "clip")
-        source_annotation = require_path(paths["annotation"], "annotation")
-        source_manifest = require_path(paths["manifest"], "manifest")
-        source_video_meta = require_path(paths["video_meta"], "video_meta")
-        target_clip = clips_dir / f"{clip_uid}{source_clip.suffix or '.mp4'}"
-        shutil.copy2(source_clip, target_clip)
-        shutil.copy2(source_annotation, raw_annotations_dir / f"{clip_uid}.json")
+        clip_suffix = source_clip.suffix if source_clip is not None and source_clip.suffix else ".mp4"
+        target_clip = clips_dir / f"{clip_uid}{clip_suffix}"
+        export_clip_file(
+            row=row,
+            source_clip_path=source_clip,
+            source_video_path=source_video,
+            target_path=target_clip,
+        )
 
-        annotation_payload = load_json(source_annotation)
+        annotation_payload = build_raw_annotation_payload(row, source_annotation)
+        raw_annotation_target = raw_annotations_dir / f"{clip_uid}.json"
+        if source_annotation is not None and source_annotation.exists():
+            shutil.copy2(source_annotation, raw_annotation_target)
+        else:
+            raw_annotation_target.write_text(
+                json.dumps(annotation_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
         final_annotation = annotation_payload.get("final_annotation")
         if not isinstance(final_annotation, dict):
             final_annotation = loads_json(row["final_annotation_json"], {})
@@ -488,14 +699,24 @@ def export_dataset(
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    runtime_root = resolve_path(args.runtime_root)
+    project = load_project_settings(args.config_paths)
+
+    runtime_root_raw = args.runtime_root or project.get("runtime_dir") or "runtime"
+    runtime_root = resolve_path(runtime_root_raw)
     db_path = resolve_path(args.db_path) if args.db_path else runtime_root / "index.sqlite"
     output_root = resolve_path(args.output_root) if args.output_root else runtime_root / "exports"
-    annotation_domains_path = find_annotation_domains(runtime_root, args.annotation_domains)
+
+    annotation_domains_raw = args.annotation_domains
+    if annotation_domains_raw is None:
+        config_annotation_domains = project.get("annotation_domains_path")
+        if isinstance(config_annotation_domains, str) and config_annotation_domains.strip():
+            annotation_domains_raw = config_annotation_domains
+    annotation_domains_path = find_annotation_domains(runtime_root, annotation_domains_raw)
     caps = parse_caps(args.cap)
 
     result = export_dataset(
         db_path=db_path,
+        runtime_root=runtime_root,
         output_root=output_root,
         annotation_domains_path=annotation_domains_path,
         limit=args.limit,
